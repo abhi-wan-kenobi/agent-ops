@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.2.2 — 2026-09-02
+
+### Added
+
+- **Config-driven provider headers**: `[providers.<name>.headers]` in panel.toml sends
+  extra request headers (attribution, routing, tagging spend per team at the provider).
+  Vendor-neutral — the core never interprets them. `Authorization` and `Content-Type` are
+  refused at load time: credentials go through `api_key_env` so a key never lives in the
+  config file, and even a hand-built config cannot displace auth — it is applied after
+  user headers. OpenRouter's default `X-Title` attribution is overridable.
+
+### Documented
+
+- `list_models`' blanket exception collapse (401 / SSL / network → the same `None`) is a
+  recorded decision, now stated in its docstring: every caller treats `None` as "could
+  not ask, do not block", and a bad key surfaces loudly on the POST that actually runs
+  the seat.
+
 ## v0.2.1 — 2026-09-01
 
 All three items came from the dogfood queue — defects found by running agent-ops on real

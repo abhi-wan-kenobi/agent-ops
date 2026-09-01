@@ -236,3 +236,39 @@ def test_inbound_error_text_is_secret_redacted(server):
     assert "ghp_" not in out.error
     assert "[REDACTED]" in out.error
     assert "rejected" in out.error, "the non-secret part of the message must survive"
+
+
+def _provider_with_headers(script, headers, *, key_env=None, type_="openai-compatible"):
+    return make_provider(ProviderConfig(name="test", type=type_, base_url=script.base_url,
+                                        api_key_env=key_env, headers=headers))
+
+
+def test_config_headers_are_sent_on_the_wire(server):
+    """Dogfood finding C: no way to tag spend per run at the provider. Headers from the
+    provider config must reach the actual request."""
+    server.responses = [(200, _ok_body("ok"))]
+    p = _provider_with_headers(server, {"X-Cost-Center": "platform-eng"})
+    p.call("m", MSGS, max_tokens=10)
+    _, headers, _ = server.requests[0]
+    assert headers.get("X-Cost-Center") == "platform-eng"
+
+
+def test_config_headers_cannot_displace_authorization(server, monkeypatch):
+    """Authorization is applied AFTER config headers — belt to the config loader's braces
+    (which refuses an authorization key outright)."""
+    monkeypatch.setenv("THE_KEY", "real-key")
+    server.responses = [(200, _ok_body("ok"))]
+    # Bypass load_config's refusal on purpose to pin the layer's own ordering.
+    p = _provider_with_headers(server, {"Authorization": "Bearer forged"},
+                               key_env="THE_KEY")
+    p.call("m", MSGS, max_tokens=10)
+    _, headers, _ = server.requests[0]
+    assert headers.get("Authorization") == "Bearer real-key"
+
+
+def test_config_headers_can_override_openrouter_attribution(server):
+    server.responses = [(200, _ok_body("ok"))]
+    p = _provider_with_headers(server, {"X-Title": "my-org-reviews"}, type_="openrouter")
+    p.call("m", MSGS, max_tokens=10)
+    _, headers, _ = server.requests[0]
+    assert headers.get("X-Title") == "my-org-reviews"

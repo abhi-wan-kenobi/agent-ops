@@ -46,6 +46,12 @@ class ProviderConfig:
     type: str
     base_url: str
     api_key_env: str | None = None
+    # Extra request headers (attribution, routing, tenancy tagging — e.g. tagging spend
+    # per team at the provider). Vendor-neutral by construction: the core never knows
+    # what they mean. Authorization and Content-Type are refused at load time — auth
+    # goes through api_key_env (a key must never live in the config file), and the
+    # client owns its own body encoding.
+    headers: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -131,6 +137,21 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
         api_key_env = table.get("api_key_env")
         if api_key_env is not None and (not isinstance(api_key_env, str) or not api_key_env):
             raise ConfigError(f"{where}: 'api_key_env' must be a non-empty string when set")
+        headers = table.get("headers") or {}
+        if not isinstance(headers, dict):
+            raise ConfigError(f"{where}: 'headers' must be a table of string values")
+        for hk, hv in headers.items():
+            if not isinstance(hv, str):
+                raise ConfigError(f"{where}: header {hk!r} must be a string "
+                                  f"(got {type(hv).__name__})")
+            if hk.lower() == "authorization":
+                raise ConfigError(
+                    f"{where}: refusing an 'Authorization' header in the config file — "
+                    f"credentials go through 'api_key_env' so the key itself never "
+                    f"lives on disk")
+            if hk.lower() == "content-type":
+                raise ConfigError(f"{where}: 'Content-Type' is owned by the client and "
+                                  f"cannot be overridden")
         base_url = _require_str(table, "base_url", where).rstrip("/")
         # Catch the typo class here, with a message naming the fix, instead of letting
         # every seat fail later with urllib's "unknown url type".
@@ -142,6 +163,7 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
             type=_require_str(table, "type", where),
             base_url=base_url,
             api_key_env=api_key_env,
+            headers=dict(headers),
         )
 
     seats: list[Seat] = []

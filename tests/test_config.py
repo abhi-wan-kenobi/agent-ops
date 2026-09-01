@@ -131,3 +131,46 @@ def test_non_http_base_url_is_rejected_at_load(tmp_path):
                         'base_url = "openrouter.ai/api/v1"')
     with pytest.raises(ConfigError, match="http"):
         load_config(_write(tmp_path, body))
+
+
+# --- provider headers (v0.2.2, dogfood finding C) --------------------------------------------
+
+def _headers_toml(tmp_path, headers_block):
+    p = tmp_path / "panel.toml"
+    p.write_text(f"""
+[[seats]]
+name = "s"
+family = "f"
+provider = "p"
+model = "m"
+
+[providers.p]
+type = "openai-compatible"
+base_url = "http://x/v1"
+{headers_block}
+""", encoding="utf-8")
+    return p
+
+
+def test_provider_headers_parse_and_default_empty(tmp_path):
+    cfg = load_config(_headers_toml(tmp_path, '[providers.p.headers]\n"X-Team" = "eng"'))
+    assert cfg.providers["p"].headers == {"X-Team": "eng"}
+    cfg2 = load_config(_headers_toml(tmp_path, ""))     # same path, headerless rewrite
+    assert cfg2.providers["p"].headers == {}
+
+
+def test_authorization_header_in_config_is_refused(tmp_path):
+    with pytest.raises(ConfigError, match="api_key_env"):
+        load_config(_headers_toml(
+            tmp_path, '[providers.p.headers]\nauthorization = "Bearer sk-x"'))
+
+
+def test_content_type_header_in_config_is_refused(tmp_path):
+    with pytest.raises(ConfigError, match="Content-Type"):
+        load_config(_headers_toml(
+            tmp_path, '[providers.p.headers]\n"content-type" = "text/plain"'))
+
+
+def test_non_string_header_value_is_refused(tmp_path):
+    with pytest.raises(ConfigError, match="must be a string"):
+        load_config(_headers_toml(tmp_path, '[providers.p.headers]\n"X-N" = 5'))
