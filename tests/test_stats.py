@@ -21,6 +21,9 @@ SEATS = [
     {"model": "model-b", "seat": "seat-b", "family": "fam-b", "findings": None,
      "status": "timeout", "reason": "timeout", "truncated": False, "seconds": 900.0,
      "chars": 0},
+    {"model": "model-c", "seat": "seat-c", "family": "fam-c", "findings": 1,
+     "status": "truncated", "reason": "", "truncated": True, "seconds": 30.0,
+     "chars": 500},
 ]
 
 
@@ -129,3 +132,37 @@ def test_verdict_cli_round_trip(stats_path, capsys):
     assert "recorded" in capsys.readouterr().out
     with pytest.raises(SystemExit):
         run_verdict(stats_path, ["run-1", "fam-a", "1", "maybe"])  # not a valid verdict
+
+
+# --- panel findings, 2026-09-01 (v0.2 audit) ----------------------------------------------
+
+def test_verdict_beyond_emitted_count_is_refused(stats_path):
+    """Panel finding: a verdict for finding 99 on a 3-finding seat fabricates data."""
+    code, msg = append_verdict(stats_path, "run-1", "fam-a", 4, "fp", None)
+    assert code == 2 and "no finding 4" in msg
+    assert all(r.get("kind") != "verdict" for r in read_lines(stats_path))
+
+
+def test_verdict_on_dead_seat_is_refused(stats_path):
+    """findings=None means the seat never looked — there is nothing to judge."""
+    code, msg = append_verdict(stats_path, "run-1", "fam-b", 1, "confirmed", None)
+    assert code == 2 and "never produced a report" in msg
+
+
+def test_verdict_beyond_count_on_truncated_seat_is_trusted(stats_path):
+    """A truncated seat's count is inferred and may be short; the human's count wins."""
+    code, _ = append_verdict(stats_path, "run-1", "fam-c", 3, "confirmed", None)
+    assert code == 0
+
+
+def test_malformed_verdict_line_does_not_crash_stats(stats_path, capsys):
+    """Panel finding: a verdict line missing/mistyping its verdict value KeyError'd the
+    whole stats command — one bad line must not take the quality history down."""
+    with stats_path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"kind": "verdict", "run": "run-1", "seat": "seat-a",
+                             "finding": 1}) + "\n")
+        fh.write(json.dumps({"kind": "verdict", "run": "run-1", "seat": "seat-a",
+                             "finding": 2, "verdict": "false-positive"}) + "\n")
+    summary = summarize(read_lines(stats_path))
+    assert summary["seats"]["seat-a"]["judged"] == 0
+    assert run_stats(stats_path, []) == 0

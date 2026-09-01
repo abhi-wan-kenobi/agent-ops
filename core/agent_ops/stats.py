@@ -93,6 +93,17 @@ def append_verdict(stats_path: pathlib.Path, run_id: str, seat_key: str, finding
     if row is None:
         names = ", ".join(sorted({r.get("family", "?") for r in run.get("seats", [])}))
         return 2, f"seat {seat_key!r} not in run {run_id} — its seats (by family): {names}"
+    # A verdict must name a finding the seat actually emitted, or the rates aggregate
+    # fabrications (panel finding, 2026-09-01). Two carve-outs: a dead seat has NOTHING to
+    # judge (findings None ≠ zero findings), and a truncated report's count is inferred
+    # and may be short, so an over-count verdict there is trusted rather than refused.
+    emitted = row.get("findings")
+    if emitted is None:
+        return 2, (f"seat {row.get('family')} never produced a report in run {run_id} — "
+                   f"there is no finding to judge")
+    if finding > emitted and not row.get("truncated"):
+        return 2, (f"seat {row.get('family')} emitted {emitted} finding(s) in run "
+                   f"{run_id} — there is no finding {finding}")
 
     prior = None
     for rec in lines:
@@ -151,6 +162,11 @@ def summarize(lines: list[dict]) -> dict:
                 s["findings"] += row["findings"]
                 c["findings"] += row["findings"]
     for v in _effective_verdicts(lines).values():
+        # A hand-edited or half-written verdict line must not take `stats` down with a
+        # KeyError — same tolerance read_lines gives unparseable lines. Panel finding,
+        # 2026-09-01.
+        if v.get("verdict") not in VERDICTS:
+            continue
         s = seats.get(v.get("seat"))
         if s is not None:
             s[v["verdict"]] += 1

@@ -191,3 +191,11 @@ def test_probe_seconds_missing_or_corrupt_roster_is_empty_not_fatal(tmp_path):
     cfg.state_dir.mkdir(parents=True, exist_ok=True)
     cfg.roster_path.write_text("{nope", encoding="utf-8")
     assert load_probe_seconds(cfg) == {}
+
+
+def test_probe_seconds_zero_is_a_measurement_not_missing(tmp_path):
+    """Panel finding, 2026-09-01: a falsy check dropped a 0-second measurement."""
+    cfg = _config(tmp_path)
+    _write_roster_with_detail(cfg, [{"seat": "seat-a", "seconds": 0,
+                                     "verdict": "good"}])
+    assert load_probe_seconds(cfg) == {"seat-a": 0.0}

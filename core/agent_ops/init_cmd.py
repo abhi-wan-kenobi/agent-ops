@@ -120,21 +120,31 @@ def run_init(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     target = pathlib.Path(a.config or DEFAULT_CONFIG_PATH).expanduser()
-    if target.exists():
+    text = OLLAMA_TOML if a.ollama else OPENROUTER_TOML
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # Exclusive create, not check-then-write: two concurrent inits racing past an
+        # exists() check would clobber each other — the exact data loss "never
+        # overwrites" promises away. Panel finding, 2026-09-01.
+        with open(target, "x", encoding="utf-8") as fh:
+            fh.write(text)
+    except FileExistsError:
         print(f"REFUSED: {target} already exists — init never overwrites a panel config.\n"
               f"         Edit it directly, or pass --config to write somewhere else.",
               file=sys.stderr)
         return 1
-
-    text = OLLAMA_TOML if a.ollama else OPENROUTER_TOML
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(text, encoding="utf-8")
+    except OSError as e:
+        print(f"ERROR: cannot write {target}: {e}", file=sys.stderr)
+        return 1
 
     # The file just written must survive the loader's own validation — shipping an init
     # that produces a config `audit` then rejects would be worse than no init at all.
     try:
         load_config(target)
     except ConfigError as e:                                    # pragma: no cover
+        # Remove the reject, or it blocks every future init behind the REFUSED check
+        # while being useless to keep. Panel finding, 2026-09-01.
+        target.unlink(missing_ok=True)
         print(f"BUG: init wrote a config its own loader rejects ({e}) — please report",
               file=sys.stderr)
         return 2

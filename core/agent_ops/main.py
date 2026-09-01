@@ -180,7 +180,18 @@ def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
         if run_state.cancel_requested(run_id):
             cancelled = True
             break
-        payload, _, desc = build_payload(repo, a.scope, f, config.max_payload, exact=True)
+        # A crash on one file must skip THAT file, not escape the loop — an escaped
+        # exception bypasses finish_run and strands the record as "running" while the
+        # remaining files silently go unreviewed. Mirrors safe_runner's reasoning.
+        # Panel finding, 2026-09-01.
+        try:
+            payload, _, desc = build_payload(repo, a.scope, f, config.max_payload,
+                                             exact=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f">> [{i}/{len(files)}] {f}: payload build failed — "
+                  f"{type(e).__name__}: {e} — SKIPPED", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "error"})
+            continue
         if not payload.strip():
             print(f">> [{i}/{len(files)}] {f}: produced no payload — SKIPPED "
                   f"(changed since discovery?)", file=sys.stderr)

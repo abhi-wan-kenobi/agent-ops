@@ -512,3 +512,26 @@ def test_split_by_file_skips_a_file_with_a_secret_but_reviews_the_rest(
     assert "SKIPPED" in err and "credential" in err
     assert "1 file(s) reviewed" in err and "1 skipped" in err
     assert len(sent) == 2, "only the clean file's panel may have been called"
+
+
+def test_split_by_file_payload_crash_skips_that_file_not_the_run(env, monkeypatch, capsys):
+    """Panel finding, 2026-09-01: an exception on one file's payload build escaped the
+    loop, bypassed finish_run, and stranded the record as 'running' forever."""
+    from agent_ops import main as mm
+    repo, cfg, _ = env
+    _second_file(repo)
+    real = mm.build_payload
+
+    def boom(repo_, scope, only=None, max_payload=0, **kw):
+        if only == "a.py":
+            raise RuntimeError("synthetic payload failure")
+        return real(repo_, scope, only, max_payload, **kw)
+    monkeypatch.setattr(mm, "build_payload", boom)
+
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "payload build failed" in err and "SKIPPED" in err
+    rec = run_state.list_runs()[0]
+    assert rec["state"] == "failed", "the record must reach a terminal state"
+    assert "1 file(s) reviewed" in err, "the other file must still have been reviewed"

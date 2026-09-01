@@ -64,3 +64,17 @@ def test_init_is_wired_as_a_subcommand(tmp_path, capsys):
     # The printed follow-up commands must carry the non-default path, or a user who ran
     # init --config would copy-paste commands that read a config that does not exist.
     assert f"--config {target}" in capsys.readouterr().out
+
+
+def test_unwritable_target_is_a_clean_error_not_a_traceback(tmp_path, capsys):
+    """Panel finding, 2026-09-01 (three seats across two lanes): uncaught OSError."""
+    import os
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    os.chmod(ro, 0o500)
+    try:
+        rc = run_init(["--config", str(ro / "sub" / "panel.toml")])
+    finally:
+        os.chmod(ro, 0o700)
+    assert rc == 1
+    assert "ERROR: cannot write" in capsys.readouterr().err

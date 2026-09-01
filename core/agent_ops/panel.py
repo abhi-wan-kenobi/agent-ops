@@ -70,7 +70,7 @@ def load_probe_seconds(config: Config) -> dict[str, float]:
         if (time.time() - float(raw["generated"])) / 86400 > ROSTER_MAX_AGE_DAYS:
             return {}
         return {str(r["seat"]): float(r["seconds"]) for r in raw.get("all", [])
-                if r.get("seconds") and r.get("verdict") != "fail"}
+                if r.get("seconds") is not None and r.get("verdict") != "fail"}
     except Exception:                                          # noqa: BLE001
         return {}
 
