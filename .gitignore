@@ -1,0 +1,28 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+
+# Local provider configuration — never commit; it names key env vars and endpoints
+# (panel.example.toml IS committed; a real panel.toml never should be)
+panel.toml
+panel.local.toml
+!panel.example.toml
+.env
+*.key
+
+# Local run state and reports
+.agent-ops/
+reports/
+*.report.md
+
+# Session kickoff notes (working documents, not product docs)
+KICKOFF.md
+
+.DS_Store
+
+# Internal working docs — never commit to the public history
+PLAN.md
+CLAUDE.md
+KICKOFF.md

@@ -1,0 +1,76 @@
+# agent-ops panel configuration — copy to ~/.agent-ops/panel.toml and edit.
+#
+#   mkdir -p ~/.agent-ops && cp panel.example.toml ~/.agent-ops/panel.toml
+#   export OPENROUTER_API_KEY=sk-or-...
+#
+# Seats are the reviewers. Keep them in DIFFERENT model families: the panel mechanically
+# excludes the family that wrote the code (--coder), and with one family that exclusion
+# would leave nothing. Pick seats for OUTPUT DISCIPLINE, not raw capability — a
+# heavy-reasoning model spends its whole output budget thinking and emits an empty report
+# that looks like a clean pass. Run `agent_ops probe` after editing: it scores every seat
+# on a known-defect diff and ranks the usable ones into roster.json.
+
+[agent_ops]
+# outroot     = "~/.agent-ops/audits"   # where per-run reports land
+# state_dir   = "~/.agent-ops/state"    # roster.json, run records, stats.jsonl, lease
+# max_payload = 400000                  # chars of diff+files; truncates loudly beyond this
+# max_tokens  = 8000                    # per-seat output budget. Calibrated: a tighter cap
+#                                       # manufactures empty reports instead of measuring them
+# lease_slots = 1                       # concurrent panels. Raise only after measuring your
+#                                       # provider serving that many cleanly — saturation
+#                                       # queues silently, it does not error
+
+# ── Starter panel: three cheap, diverse OpenRouter families ────────────────────────────
+# Model ids verified against openrouter.ai/api/v1/models on 2026-09-01. Rough cost for a
+# typical review (a few thousand chars of diff, three seats, 8k output budget): well under
+# US$0.05 per run — usually under a cent. If an id has been retired since, `agent_ops
+# probe` will tell you, loudly.
+
+[[seats]]
+name = "seat-a"
+family = "minimax"
+provider = "openrouter"
+model = "minimax/minimax-m2.7"
+
+[[seats]]
+name = "seat-b"
+family = "gpt"
+provider = "openrouter"
+model = "openai/gpt-oss-120b"
+
+[[seats]]
+name = "seat-c"
+family = "glm"
+provider = "openrouter"
+model = "z-ai/glm-5.3-flash"
+
+# ── Free path: a local Ollama model, no API key at all ─────────────────────────────────
+# Uncomment if you run Ollama locally (https://ollama.com). A local seat is free and
+# private; it is also weaker — keep at least one cloud family alongside it if you can.
+
+# [[seats]]
+# name = "local"
+# family = "llama"
+# provider = "ollama"
+# model = "llama3.1"
+
+# ── Providers ───────────────────────────────────────────────────────────────────────────
+# `type` selects the client implementation; openrouter/ollama/openai-compatible all speak
+# the same OpenAI-compatible dialect. `api_key_env` NAMES the environment variable — the
+# key itself never lives in this file. Omit api_key_env for endpoints with no auth.
+
+[providers.openrouter]
+type = "openrouter"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+
+[providers.ollama]
+type = "ollama"
+base_url = "http://localhost:11434/v1"
+# api_key_env omitted → no Authorization header
+
+# Any other OpenAI-compatible endpoint works the same way:
+# [providers.my-endpoint]
+# type = "openai-compatible"
+# base_url = "https://api.example.com/v1"
+# api_key_env = "MY_ENDPOINT_KEY"
