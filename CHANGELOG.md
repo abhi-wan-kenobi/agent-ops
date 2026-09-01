@@ -1,5 +1,37 @@
 # Changelog
 
+## v0.2.1 — 2026-09-01
+
+All three items came from the dogfood queue — defects found by running agent-ops on real
+work, with measurements attached.
+
+### Added
+
+- **Stress-stage probing.** A seat can score `good` on the small probe and still return
+  nothing on a real payload: reasoning burn scales with input, and the probe diff is five
+  lines (measured twice on the same seat — clean probes, then empty content with the whole
+  budget in `reasoning` at 9k and 11k chars). Every seat that passes the small probe is now
+  probed again with the same two defects inside a ~12k-char realistic payload; a seat that
+  goes silent at stress size is demoted out of the panel, loudly, with the stress record
+  kept in the roster. Only silence demotes — a seat that answers but scores thin at stress
+  size stays eligible. Stress failures are re-probed once before demoting.
+- **`reasoning_chars` per seat in stats run lines**, so reasoning volume per input size is
+  measurable from `stats.jsonl` over time instead of only observable when a seat dies.
+
+### Fixed
+
+- **Inbound error text is now secret-redacted.** Outbound payloads were always gated;
+  upstream error bodies were written to seat reports and stderr verbatim. An endpoint that
+  echoes request context into its error message would have put a live credential on disk.
+  Same pattern set, inbound direction, matches replaced with `[REDACTED]`.
+
+### Decided
+
+- **A report landing entirely in the reasoning channel is a dead seat, never rescued** —
+  now a recorded decision (playbook rule 3) rather than an accident of data flow. Content
+  is the contract; grading unaddressed deliberation would reward the indiscipline the
+  classification screens for.
+
 ## v0.2.0 — 2026-09-01
 
 Theme: adoption. v0.1 proved "installable by a stranger"; v0.2 removes the frictions hit

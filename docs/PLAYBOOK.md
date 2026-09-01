@@ -38,6 +38,13 @@ The same property that makes a model good at planning — long internal delibera
 a poor panel seat, because the budget goes to thinking rather than reporting. Choose seats
 for output discipline, not raw capability.
 
+A recorded decision, not an accident of plumbing (2026-09-01): **a report that lands
+entirely in the reasoning channel is a dead seat, never rescued.** The content field is the
+contract. Reasoning channels differ per provider, are often truncated or withheld, and were
+never addressed to a reader — grading a seat on text it did not choose to emit would reward
+exactly the indiscipline this rule screens for. The probe's stress stage exists to catch
+these seats before they cost you a real review.
+
 ## 4. Never let a family review its own family's work
 
 Exclude the model family that wrote the code, mechanically, not by convention. A model
