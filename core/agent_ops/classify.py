@@ -79,6 +79,9 @@ def classify_seat(out: str, timed_out: bool, failed: bool,
         return "error", None, (reason or "seat exited without a report")
     if not out.strip():
         # The reasoning-burn shape: HTTP 200, finish=length, and nothing in content. Not a
-        # transport error and not truncation of a report — there is no report.
+        # transport error and not truncation of a report — there is no report. By recorded
+        # decision (playbook rule 3), text left in the reasoning channel is never rescued:
+        # content is the contract, and grading unaddressed deliberation would reward the
+        # indiscipline this classification screens for.
         return "empty", None, "no content at all (output budget likely spent in reasoning)"
     return "truncated", len(SEVERITY_RE.findall(out)), ""

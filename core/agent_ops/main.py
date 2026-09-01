@@ -95,7 +95,10 @@ def run_seat(provider: BaseProvider, seat: Seat, prompt: str, outdir: pathlib.Pa
     return {"model": seat.model, "seat": seat.name, "family": seat.family,
             "findings": findings, "status": status, "reason": reason,
             "truncated": status == "truncated", "seconds": out.seconds,
-            "chars": len(out.content)}
+            "chars": len(out.content),
+            # Reasoning volume per run makes the burn cliff measurable from stats.jsonl
+            # (reasoning-per-input-char per seat) instead of only observable at death.
+            "reasoning_chars": len(out.reasoning)}
 
 
 def acquire_lease_cooperatively(lease: Lease, run_id: str, label: str, ttl: int = 3600,

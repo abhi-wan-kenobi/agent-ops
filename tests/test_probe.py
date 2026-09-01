@@ -18,14 +18,26 @@ THIN_REPORT = "SEVERITY: high\nFILE: payments.py:5\nWHAT: one only\n\nAUDIT COMP
 
 
 class StubProvider:
-    """Scripted per-model outputs; records calls."""
+    """Scripted per-model outputs; records small-probe and stress calls separately
+    (told apart by prompt size — the small probe prompt is ~1k chars, the stress prompt
+    ≥ STRESS_TARGET_CHARS). Stress default is a GOOD report, so tests written before the
+    stress stage keep their meaning: their seats simply survive it."""
 
-    def __init__(self, outputs: dict[str, list[SeatOutput]]):
+    def __init__(self, outputs: dict[str, list[SeatOutput]],
+                 stress_outputs: dict[str, list[SeatOutput]] | None = None):
         self.outputs = {m: list(outs) for m, outs in outputs.items()}
+        self.stress_outputs = {m: list(o) for m, o in (stress_outputs or {}).items()}
         self.calls: list[str] = []
+        self.stress_calls: list[str] = []
         self.ctx: dict[str, int] = {}
 
     def call(self, model, messages, *, max_tokens, temperature=None, timeout=0):
+        if len(messages[0]["content"]) > 5000:
+            self.stress_calls.append(model)
+            outs = self.stress_outputs.get(model, [])
+            if not outs:
+                return SeatOutput(content=GOOD_REPORT)
+            return outs.pop(0) if len(outs) > 1 else outs[0]
         self.calls.append(model)
         outs = self.outputs.get(model, [])
         return outs.pop(0) if len(outs) > 1 else (outs[0] if outs else SeatOutput(content=""))
@@ -229,3 +241,99 @@ def test_missing_provider_key_fails_those_seats_loudly_not_silently(tmp_path, mo
     assert roster["all"][0]["verdict"] == "fail"
     assert "THE_KEY" in roster["all"][0]["why"]
     assert "THE_KEY" in capsys.readouterr().err
+
+
+# --- stress stage (v0.2.1, dogfood finding B) ------------------------------------------------
+
+BURNED = SeatOutput(content="", reasoning="r" * 9000, finish_reason="length")
+
+
+def test_build_stress_prompt_is_big_realistic_and_deterministic():
+    from agent_ops.probe import STRESS_TARGET_CHARS, build_stress_prompt
+    p = build_stress_prompt()
+    assert len(p) >= STRESS_TARGET_CHARS
+    assert "===== FULL FILE: payments.py =====" in p
+    assert "load_refunds()" in p, "the two known defects must still be present"
+    assert p == build_stress_prompt(), "must be comparable across runs"
+
+
+def test_stress_silent_seat_is_demoted_out_of_the_panel(tmp_path, stub):
+    """The finding: a seat probes good on ~1k chars, then burns its whole budget in
+    reasoning on a real payload. Two-for-two measured; the stress stage must catch it."""
+    seats = [_seat("burner", "fam-a", "model-burn"), _seat("solid", "fam-b", "model-b")]
+    stub["provider"] = StubProvider(
+        {"model-burn": [SeatOutput(content=GOOD_REPORT)],
+         "model-b": [SeatOutput(content=GOOD_REPORT)]},
+        stress_outputs={"model-burn": [BURNED]})
+    cfg = _config(tmp_path, seats)
+    rc = run_probe(cfg)
+    assert rc == 1, "one usable family left — degraded, and the exit code must say so"
+    roster = json.loads(cfg.roster_path.read_text())
+    assert [f for _, f in roster["seats"]] == ["fam-b"], "the burner must leave the panel"
+    row = next(r for r in roster["all"] if r["seat"] == "burner")
+    assert row["verdict"] == "thin" and "DEMOTED by stress probe" in row["why"]
+    assert row["stress"]["verdict"] == "fail"
+    assert row["stress"]["reasoning_chars"] == 9000
+
+
+def test_stress_fail_is_retried_once_and_recovery_keeps_the_seat(tmp_path, stub):
+    seats = [_seat("flappy", "fam-a", "model-a"), _seat("solid", "fam-b", "model-b")]
+    stub["provider"] = StubProvider(
+        {"model-a": [SeatOutput(content=GOOD_REPORT)],
+         "model-b": [SeatOutput(content=GOOD_REPORT)]},
+        stress_outputs={"model-a": [BURNED, SeatOutput(content=GOOD_REPORT)]})
+    cfg = _config(tmp_path, seats)
+    assert run_probe(cfg) == 0
+    assert stub["provider"].stress_calls.count("model-a") == 2
+    roster = json.loads(cfg.roster_path.read_text())
+    row = next(r for r in roster["all"] if r["seat"] == "flappy")
+    assert row["verdict"] == "good" and row["stress"]["verdict"] == "good"
+
+
+def test_stress_thin_is_recorded_but_does_not_demote(tmp_path, stub):
+    """Answering-but-weak at stress size is degraded, not dead — only silence demotes,
+    because silence is what reads as a clean review on real work."""
+    seats = [_seat("s1", "fam-a", "model-a"), _seat("s2", "fam-b", "model-b")]
+    stub["provider"] = StubProvider(
+        {"model-a": [SeatOutput(content=GOOD_REPORT)],
+         "model-b": [SeatOutput(content=GOOD_REPORT)]},
+        stress_outputs={"model-a": [SeatOutput(content=THIN_REPORT)]})
+    cfg = _config(tmp_path, seats)
+    assert run_probe(cfg) == 0
+    roster = json.loads(cfg.roster_path.read_text())
+    row = next(r for r in roster["all"] if r["seat"] == "s1")
+    assert row["verdict"] == "good"
+    assert row["stress"]["verdict"] == "thin"
+
+
+def test_only_good_seats_are_stress_probed(tmp_path, stub):
+    seats = [_seat("weak", "fam-a", "model-a"), _seat("solid", "fam-b", "model-b")]
+    stub["provider"] = StubProvider({
+        "model-a": [SeatOutput(content=THIN_REPORT), SeatOutput(content=THIN_REPORT)],
+        "model-b": [SeatOutput(content=GOOD_REPORT)],
+    })
+    cfg = _config(tmp_path, seats)
+    run_probe(cfg)
+    assert "model-a" not in stub["provider"].stress_calls, (
+        "a seat that never passed the small probe has nothing to stress")
+    assert stub["provider"].stress_calls == ["model-b"]
+
+
+def test_rank_prefers_stress_good_over_stress_thin(tmp_path):
+    """Audit finding, 2026-09-02: rank() never inspected the stress record, so a seat
+    that went thin under stress ranked identically to one that stayed good there —
+    the measurement was decorative. Stress health now ranks after the hard walls."""
+    rows = [
+        {"model": "wilts", "seat": "a", "family": "fa", "verdict": "good",
+         "findings": 3, "reasoning_chars": 10, "ctx_tokens": None,
+         "stress": {"verdict": "thin"}},
+        {"model": "holds", "seat": "b", "family": "fb", "verdict": "good",
+         "findings": 2, "reasoning_chars": 10, "ctx_tokens": None,
+         "stress": {"verdict": "good"}},
+        {"model": "unmeasured", "seat": "c", "family": "fc", "verdict": "good",
+         "findings": 2, "reasoning_chars": 20, "ctx_tokens": None},
+    ]
+    order = [r["model"] for r in rank(rows)]
+    assert order.index("holds") < order.index("wilts"), order
+    assert order.index("unmeasured") < order.index("wilts"), (
+        "absent stress data is neutral, not a demotion — same rule as unknown ctx")

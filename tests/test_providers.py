@@ -223,3 +223,16 @@ def test_seat_output_defaults():
 
 def test_generic_and_ollama_types_are_the_same_implementation(server):
     assert type(_provider(server, type_="ollama")) is OpenAICompatProvider
+
+
+def test_inbound_error_text_is_secret_redacted(server):
+    """Dogfood finding E, 2026-09-01: outbound payloads are secret-gated but error bodies
+    coming BACK were written to reports and stderr verbatim — an endpoint echoing request
+    context into its error would put a live credential on disk."""
+    leaked = "bad key: " + "ghp_" + "a" * 24 + " rejected"
+    server.responses = [(401, json.dumps({"error": {"message": leaked}}).encode())]
+    out = _provider(server).call("m", MSGS, max_tokens=10)
+    assert out.error is not None and "HTTP 401" in out.error
+    assert "ghp_" not in out.error
+    assert "[REDACTED]" in out.error
+    assert "rejected" in out.error, "the non-secret part of the message must survive"

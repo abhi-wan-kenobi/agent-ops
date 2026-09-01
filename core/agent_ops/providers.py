@@ -19,6 +19,7 @@ import time
 import urllib.error
 import urllib.request
 
+from .classify import SECRET_RE
 from .config import ConfigError, ProviderConfig
 
 USER_AGENT = "agent-ops/0.1"
@@ -207,4 +208,9 @@ def _http_reason(e: urllib.error.HTTPError) -> str:
     except (json.JSONDecodeError, AttributeError, ValueError):
         detail = raw.strip()
     detail = (detail or "").strip()
+    # The outbound payload is secret-gated; error text coming BACK was not, and it lands
+    # in seat reports and stderr verbatim. An endpoint that echoes request context into
+    # its error body would put a live credential on disk. Same regex, inbound direction.
+    # Dogfood finding, 2026-09-01.
+    detail = SECRET_RE.sub("[REDACTED]", detail)
     return f"HTTP {e.code}" + (f": {detail[:200]}" if detail else "")

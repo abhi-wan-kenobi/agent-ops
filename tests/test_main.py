@@ -545,3 +545,19 @@ def test_split_by_file_payload_crash_skips_that_file_not_the_run(env, monkeypatc
     rec = run_state.list_runs()[0]
     assert rec["state"] == "failed", "the record must reach a terminal state"
     assert "1 file(s) reviewed" in err, "the other file must still have been reviewed"
+
+
+def test_stats_lines_record_reasoning_chars_per_seat(env, fake_provider):
+    """Decision D (playbook rule 3): reasoning-channel text is never rescued — but its
+    volume is recorded per run, so the burn cliff is measurable from stats.jsonl."""
+    repo, cfg, tmp = env
+    fake_provider.outputs = {
+        "model-a": SeatOutput(content=GOOD_REPORT, reasoning="r" * 1234),
+        "model-b": SeatOutput(content="", reasoning="r" * 9999, finish_reason="length"),
+    }
+    main(_argv(repo, cfg))
+    line = json.loads((tmp / "state" / "stats.jsonl").read_text().strip())
+    by_model = {s["model"]: s for s in line["seats"]}
+    assert by_model["model-a"]["reasoning_chars"] == 1234
+    assert by_model["model-b"]["reasoning_chars"] == 9999
+    assert by_model["model-b"]["findings"] is None, "burned seat stays a dead seat"
