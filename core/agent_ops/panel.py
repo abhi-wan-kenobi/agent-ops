@@ -57,6 +57,24 @@ def pick_panel(coder: str | None, n: int, override: list[str] | None,
     return out
 
 
+def load_probe_seconds(config: Config) -> dict[str, float]:
+    """Seat name -> measured probe latency, from a FRESH roster only. Never raises.
+
+    Probe latency is what lets the runner cap a dead-slow seat in minutes instead of
+    letting it burn the whole budget (a probed-at-31s local seat once sat on the full
+    900s before classifying dead). Freshness matters the same way it does for seat
+    order: a measurement from a decommissioned endpoint is not a measurement.
+    """
+    try:
+        raw = json.loads(pathlib.Path(config.roster_path).read_text(encoding="utf-8"))
+        if (time.time() - float(raw["generated"])) / 86400 > ROSTER_MAX_AGE_DAYS:
+            return {}
+        return {str(r["seat"]): float(r["seconds"]) for r in raw.get("all", [])
+                if r.get("seconds") and r.get("verdict") != "fail"}
+    except Exception:                                          # noqa: BLE001
+        return {}
+
+
 def load_seats(config: Config) -> tuple[list[Seat], str]:
     """Return (seats, provenance). Never raises: a bad roster must not block a review.
 

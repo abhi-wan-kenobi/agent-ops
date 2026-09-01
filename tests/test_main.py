@@ -356,3 +356,47 @@ def test_unknown_models_override_names_warn_instead_of_vanishing(env, capsys):
     assert rc == 0
     err = capsys.readouterr().err
     assert "'seat-typo'" in err and "matches no configured seat" in err
+
+
+# --- probe-informed per-seat timeouts (v0.2) ----------------------------------------------
+
+def _mkseat(name):
+    from agent_ops.config import Seat
+    return Seat(name=name, family=f"fam-{name}", provider="p", model=f"model-{name}")
+
+
+def test_seat_timeouts_cap_at_multiplier_with_floor_and_ceiling():
+    from agent_ops.main import (DEFAULT_TIMEOUT, TIMEOUT_FLOOR, TIMEOUT_MULTIPLIER,
+                                seat_timeouts)
+    panel = [_mkseat("fast"), _mkseat("mid"), _mkseat("slow"), _mkseat("unprobed")]
+    probed = {"fast": 5.0, "mid": 60.0, "slow": 400.0}
+    t = seat_timeouts(panel, probed, explicit=None)
+    assert t["fast"] == TIMEOUT_FLOOR, "a fast probe must not strangle a real review"
+    assert t["mid"] == 60 * TIMEOUT_MULTIPLIER
+    assert t["slow"] == DEFAULT_TIMEOUT, "probe-informed is a cap, never an extension"
+    assert t["unprobed"] == DEFAULT_TIMEOUT
+
+
+def test_explicit_timeout_overrides_probe_data():
+    from agent_ops.main import seat_timeouts
+    t = seat_timeouts([_mkseat("fast")], {"fast": 5.0}, explicit=333)
+    assert t["fast"] == 333
+
+
+def test_probed_timeouts_are_named_in_the_run_output(env, capsys):
+    """The v0.2 friction this fixes: a probed-at-31s seat burned the full 900s before
+    classifying dead, with nothing in the output explaining what cap applied."""
+    repo, cfg, tmp = env
+    state = tmp / "state"
+    state.mkdir(parents=True, exist_ok=True)
+    (state / "roster.json").write_text(json.dumps({
+        "generated": time.time(),
+        "seats": [["seat-a", "fam-a"], ["seat-b", "fam-b"]],
+        "all": [{"seat": "seat-a", "seconds": 10.0, "verdict": "good"},
+                {"seat": "seat-b", "seconds": 60.0, "verdict": "good"}],
+    }), encoding="utf-8")
+    rc = main(_argv(repo, cfg))
+    assert rc == 0
+    err = capsys.readouterr().err
+    assert "seat-a 120s (probed)" in err
+    assert "seat-b 360s (probed)" in err

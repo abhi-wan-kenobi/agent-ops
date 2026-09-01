@@ -18,12 +18,38 @@ import time
 from . import run_state
 from .classify import SECRET_RE, classify_seat
 from .config import Config, ConfigError, Seat, load_config
+from .init_cmd import run_init
 from .lease import Lease
-from .panel import family_of, load_seats, pick_panel
+from .panel import family_of, load_probe_seconds, load_seats, pick_panel
 from .payload import SEAT_NOTE_CHARS, build_payload
 from .probe import run_probe
 from .providers import BaseProvider, make_provider
 from .report import PROMPT_HEAD, append_stats, write_payload, write_seat_report
+from .stats import run_stats, run_verdict
+
+DEFAULT_TIMEOUT = 900
+# Probe-informed cap: ~6x the seat's measured probe latency, floored so a fast probe
+# never strangles a real review (payloads are far bigger than the probe diff), and never
+# ABOVE the default budget — this exists to fail dead-slow seats in minutes, not to grant
+# extensions. An explicit --timeout overrides all of it.
+TIMEOUT_MULTIPLIER = 6
+TIMEOUT_FLOOR = 120
+
+
+def seat_timeouts(panel: list[Seat], probed: dict[str, float],
+                  explicit: int | None) -> dict[str, int]:
+    """Per-seat timeout in seconds, keyed by seat name."""
+    if explicit is not None:
+        return {s.name: explicit for s in panel}
+    out: dict[str, int] = {}
+    for s in panel:
+        secs = probed.get(s.name)
+        if secs is None:
+            out[s.name] = DEFAULT_TIMEOUT
+        else:
+            out[s.name] = min(DEFAULT_TIMEOUT,
+                              max(TIMEOUT_FLOOR, int(secs * TIMEOUT_MULTIPLIER)))
+    return out
 
 
 def claim_run_dir(root: pathlib.Path, attempts: int = 50) -> tuple[str, pathlib.Path]:
@@ -150,7 +176,10 @@ def audit(argv: list[str]) -> int:
                                      "id (overrides rotation AND coder exclusion)")
     ap.add_argument("--seats", type=int, default=2)
     ap.add_argument("--focus")
-    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help=f"per-seat wall clock in seconds (default: {DEFAULT_TIMEOUT}, or "
+                         f"~{TIMEOUT_MULTIPLIER}x the seat's probed latency when a fresh "
+                         f"roster has one)")
     ap.add_argument("--only", help="review only files whose path contains this substring "
                                    "(use it — split large changes)")
     ap.add_argument("--no-lock", action="store_true")
@@ -233,6 +262,8 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
 
+    timeouts = seat_timeouts(panel, load_probe_seconds(config), a.timeout)
+
     # The run record is created BEFORE the lease is requested, so a run waiting behind
     # another panel is visible as "queued" rather than not existing yet.
     run_id, outdir = claim_run_dir(config.outroot)
@@ -275,6 +306,13 @@ def audit(argv: list[str]) -> int:
         print(f">> coder    : {a.coder or '(unspecified)'}", file=sys.stderr)
         print(f">> panel    : {', '.join(f'{s.name} ({s.model})' for s in panel)}",
               file=sys.stderr)
+        # Name each cap out loud: a seat killed at 4 minutes must be explainable from the
+        # run's own output, not from reading the roster and doing the arithmetic by hand.
+        print(f">> timeouts : "
+              + ", ".join(f"{s.name} {timeouts[s.name]}s"
+                          + (" (probed)" if a.timeout is None
+                             and timeouts[s.name] != DEFAULT_TIMEOUT else "")
+                          for s in panel), file=sys.stderr)
         # Say where the panel came from. A silent fallback is exactly how a stale roster
         # stays invisible. --models bypasses the roster, so naming it there would be a lie.
         print(f">> seats from: {'--models (explicit)' if a.models else provenance}",
@@ -286,7 +324,7 @@ def audit(argv: list[str]) -> int:
         results, cancelled = run_panel_cooperatively(
             run_id, panel,
             lambda s: run_seat(providers[s.provider], s, prompt, outdir,
-                               a.timeout, config.max_tokens))
+                               timeouts[s.name], config.max_tokens))
         if cancelled:
             note = (run_state.read_run(run_id) or {}).get("note")
             run_state.finish_run(run_id, "cancelled", note=note)
@@ -360,6 +398,16 @@ def _pop_config(argv: list[str]) -> tuple[str | None, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else ""
+    if cmd == "init":
+        return run_init(argv[1:])
+    if cmd in ("verdict", "stats"):
+        cfg_path, rest = _pop_config(argv[1:])
+        try:
+            stats_path = load_config(cfg_path).stats_path
+        except ConfigError as e:
+            print(f"CONFIG ERROR: {e}", file=sys.stderr)
+            return 2
+        return (run_verdict if cmd == "verdict" else run_stats)(stats_path, rest)
     if cmd == "probe":
         cfg_path, rest = _pop_config(argv[1:])
         json_out = "--json" in rest

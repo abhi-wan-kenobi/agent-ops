@@ -77,7 +77,9 @@ def append_stats(stats_path: pathlib.Path, *, run_id: str, repo_name: str, scope
     stats_path.parent.mkdir(parents=True, exist_ok=True)
     with stats_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps({
-            "ts": int(time.time()), "run": run_id, "repo": repo_name, "scope": scope,
-            "files": files, "payload_chars": payload_chars,
+            # `kind` discriminates run lines from verdict lines (stats.py) in the shared
+            # file; v0.1 lines lack it, and readers must treat absent as "run".
+            "ts": int(time.time()), "kind": "run", "run": run_id, "repo": repo_name,
+            "scope": scope, "files": files, "payload_chars": payload_chars,
             "coder": coder, "seats": seats,
         }) + "\n")

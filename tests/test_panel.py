@@ -5,7 +5,8 @@ import json
 import time
 
 from agent_ops.config import Config, Seat
-from agent_ops.panel import ROSTER_MAX_AGE_DAYS, family_of, load_seats, pick_panel
+from agent_ops.panel import (ROSTER_MAX_AGE_DAYS, family_of, load_probe_seconds,
+                             load_seats, pick_panel)
 
 
 def _seat(name, family, model=None):
@@ -142,3 +143,51 @@ def test_roster_seats_missing_from_config_are_named_in_the_provenance(tmp_path):
     seats, prov = load_seats(cfg)
     assert [s.name for s in seats] == ["seat-a", "seat-b"]
     assert "renamed-away" in prov, prov
+
+
+# --- load_probe_seconds ------------------------------------------------------------------
+
+def _write_roster_with_detail(cfg: Config, all_rows, generated=None):
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.roster_path.write_text(json.dumps({
+        "generated": generated if generated is not None else time.time(),
+        "seats": [[r["seat"], "fam"] for r in all_rows],
+        "all": all_rows,
+    }), encoding="utf-8")
+
+
+def test_probe_seconds_come_from_a_fresh_roster(tmp_path):
+    cfg = _config(tmp_path)
+    _write_roster_with_detail(cfg, [
+        {"seat": "seat-a", "seconds": 31.2, "verdict": "good"},
+        {"seat": "seat-b", "seconds": 55.0, "verdict": "thin"},
+    ])
+    assert load_probe_seconds(cfg) == {"seat-a": 31.2, "seat-b": 55.0}
+
+
+def test_probe_seconds_exclude_failed_seats(tmp_path):
+    """A fail row's seconds measure the failure (a transport error can return in 0.1s, a
+    timeout at the probe cap), not the seat's working latency — capping from it would be
+    capping from noise."""
+    cfg = _config(tmp_path)
+    _write_roster_with_detail(cfg, [
+        {"seat": "seat-a", "seconds": 31.2, "verdict": "good"},
+        {"seat": "dead", "seconds": 0.1, "verdict": "fail"},
+    ])
+    assert load_probe_seconds(cfg) == {"seat-a": 31.2}
+
+
+def test_probe_seconds_from_a_stale_roster_are_ignored(tmp_path):
+    cfg = _config(tmp_path)
+    old = time.time() - (ROSTER_MAX_AGE_DAYS + 1) * 86400
+    _write_roster_with_detail(cfg, [{"seat": "seat-a", "seconds": 31.2,
+                                     "verdict": "good"}], generated=old)
+    assert load_probe_seconds(cfg) == {}
+
+
+def test_probe_seconds_missing_or_corrupt_roster_is_empty_not_fatal(tmp_path):
+    cfg = _config(tmp_path)
+    assert load_probe_seconds(cfg) == {}
+    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    cfg.roster_path.write_text("{nope", encoding="utf-8")
+    assert load_probe_seconds(cfg) == {}
