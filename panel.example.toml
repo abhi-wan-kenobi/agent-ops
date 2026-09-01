@@ -74,3 +74,10 @@ base_url = "http://localhost:11434/v1"
 # type = "openai-compatible"
 # base_url = "https://api.example.com/v1"
 # api_key_env = "MY_ENDPOINT_KEY"
+
+# Optional per-provider request headers — attribution, routing, or tagging spend per
+# team/project at the provider. Authorization and Content-Type are refused here:
+# credentials go through api_key_env, never through this file.
+# [providers.openrouter.headers]
+# "HTTP-Referer" = "https://my-team.example.com"
+# "X-Cost-Center" = "platform-eng"

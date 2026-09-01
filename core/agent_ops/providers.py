@@ -59,6 +59,11 @@ class BaseProvider:
 
     def _headers(self) -> dict[str, str]:
         h = {"Content-Type": "application/json", "User-Agent": USER_AGENT}
+        # Config-supplied headers (attribution / routing / tenancy) sit between the
+        # defaults and auth: they may override the User-Agent, but Authorization is
+        # applied AFTER them and Content-Type/Authorization are refused at config load,
+        # so no config line can smuggle or displace a credential.
+        h.update(self.cfg.headers)
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h
@@ -131,7 +136,14 @@ class BaseProvider:
 
     def list_models(self, timeout: float = 15.0) -> list[dict] | None:
         """Best-effort GET /models. None = could not ask — which must never be treated as
-        "nothing exists"; an unreachable listing endpoint is not a verdict on the models."""
+        "nothing exists"; an unreachable listing endpoint is not a verdict on the models.
+
+        The blanket `except` is a recorded decision (dogfood finding F, 2026-09-02), not
+        an oversight: a 401, an SSL failure and a network drop all collapse to the same
+        None DELIBERATELY, because every caller treats None identically ("could not ask,
+        do not block") and the failure that matters — a bad key — surfaces loudly moments
+        later on the POST that actually runs the seat. Distinguishing the causes here
+        would add taxonomy with no consumer."""
         req = urllib.request.Request(f"{self.cfg.base_url}/models",
                                      headers=self._headers())
         try:
