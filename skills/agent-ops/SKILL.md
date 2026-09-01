@@ -17,21 +17,25 @@ is worth reading once in whole.
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops <repo> \
   --coder <model that wrote the code> \
   [--scope uncommitted|last|commit:<ref>|<git-ref>] \
-  [--only <path-substring>] [--seats N] [--focus "..."] [--config <panel.toml>]
+  [--only <path-substring>] [--split-by-file] [--seats N] [--focus "..."] \
+  [--config <panel.toml>]
 ```
 
 **Always pass `--coder`** (e.g. `--coder opus` when you wrote the code). It is what makes
 family rotation mechanical rather than advisory: the coder's family is excluded from the
 panel, so nothing ever reviews its own family's work.
 
-Setup lives in `~/.agent-ops/panel.toml` (start from the plugin's `panel.example.toml`)
-plus one API key env var. If the config is missing the run says so and exits — nothing to
-diagnose. Related commands:
+Setup lives in `~/.agent-ops/panel.toml` — `agent_ops init` writes a starter (or use the
+`/panel-setup` command for the guided path) — plus one API key env var. If the config is
+missing the run says so and exits — nothing to diagnose. Related commands:
 
 ```bash
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init [--ollama]  # write a starter panel.toml
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops probe          # score & rank the configured seats
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs list     # inspect / cancel runs
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs cancel <run-id>
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops verdict <run-id> <family> <n> confirmed|fp [--note why]
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops stats          # per-seat / per-coder false-positive rates
 ```
 
 ## What it does
@@ -68,9 +72,11 @@ Seat statuses, each meaning something different:
 
 ## Discipline for large changes
 
-Review ONE commit or ONE file at a time — `--only <substring>` narrows both the file list
-and the diff hunks. Splitting is the difference between a real review and a silent no-op.
-A brand-new file is inlined once (its '+' hunks are dropped), so `--only` plus new files
+Review ONE commit or ONE file at a time. `--split-by-file` does this as a single command:
+one panel per changed file, sequentially under one lease, one summary, per-file report
+subdirs. `--only <substring>` narrows the file list first (and works alone for a targeted
+single review). Splitting is the difference between a real review and a silent no-op.
+A brand-new file is inlined once (its '+' hunks are dropped), so narrowing plus new files
 still behaves.
 
 ## After the panel reports
@@ -83,3 +89,8 @@ For every confirmed finding, close the loop:
 4. Report what was confirmed, what was a false positive **and why**, and what changed.
    A right finding can carry a wrong fix — verify the remedy separately from the
    diagnosis. Never paste raw seat reports as the summary.
+5. Record each judgement so the panel's own error rate stays measured:
+   `python3 -m agent_ops verdict <run-id> <family> <n> confirmed|fp --note <why>`.
+   (For `--split-by-file` runs the run id is `<run-id>/<file-subdir>`, printed in the
+   summary.) `agent_ops stats` then shows each seat's false-positive rate — that number
+   is what calibrates how much to trust the next report.

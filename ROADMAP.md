@@ -4,7 +4,7 @@ v0.1.0 (2026-09-01) shipped the core: multi-family panel over plain HTTP, coder-
 exclusion, dead-seat detection, probe-ranked rosters, lease, run records, safety hooks,
 and the playbook. What's next, in order of intent — dates are aims, not promises.
 
-## v0.2 — adoption friction (planned 2026-09)
+## v0.2 — adoption friction (shipped 2026-09-01, see CHANGELOG.md)
 
 - **`agent_ops init`** and a guided `/panel-setup` command: key → reviewing in two steps.
 - **Close the loop as data**: record confirmed / false-positive verdicts per finding
@@ -19,6 +19,10 @@ and the playbook. What's next, in order of intent — dates are aims, not promis
 ## v0.3 — exploratory, demand-driven
 
 - GitHub Action: run the panel on pull requests, post the seat reports as a comment.
+- Payload edge case (panel lead, 2026-09-01): a brand-new file that is on disk but whose
+  `read_text` raises (e.g. permission denied) loses both its hunks and its full text —
+  the dedup drops the hunks before the read can fail. Narrow, but the change would be
+  invisible to the review.
 - A hosted seat provider as *one more* `type` in the registry — for people without any
   API key. BYOK stays first-class and free, always.
 - Windows file-locking (hooks already run everywhere and fail open).

@@ -54,16 +54,16 @@ In Claude Code:
 /plugin install agent-ops@agent-ops
 ```
 
-Then configure a panel (once):
+Then configure a panel (once) — `/panel-setup` walks you through it, or directly:
 
 ```bash
-mkdir -p ~/.agent-ops
-cp <plugin>/panel.example.toml ~/.agent-ops/panel.toml   # then edit, or use as-is
-export OPENROUTER_API_KEY=sk-or-...                      # or use the keyless Ollama block
+PYTHONPATH=<plugin>/core python3 -m agent_ops init       # or: init --ollama for the keyless path
+export OPENROUTER_API_KEY=sk-or-...                      # init prints this line too
 ```
 
-The example panel is three cheap, diverse OpenRouter families; a typical review costs
-well under US$0.05, usually under a cent. Local Ollama seats are free.
+The starter panel is three cheap, diverse OpenRouter families; a typical review costs
+well under US$0.05, usually under a cent. Local Ollama seats are free. `init` never
+overwrites an existing panel.toml.
 
 ## Use
 
@@ -72,6 +72,8 @@ or run the panel directly from any checkout:
 
 ```bash
 PYTHONPATH=<plugin>/core python3 -m agent_ops <repo> --coder <model-that-wrote-it>
+PYTHONPATH=<plugin>/core python3 -m agent_ops <repo> --coder <model> --split-by-file
+                                                           # one panel per changed file, one summary
 PYTHONPATH=<plugin>/core python3 -m agent_ops probe        # score & rank your seats
 PYTHONPATH=<plugin>/core python3 -m agent_ops runs list    # inspect / cancel runs
 ```
@@ -79,6 +81,14 @@ PYTHONPATH=<plugin>/core python3 -m agent_ops runs list    # inspect / cancel ru
 Reports land under `~/.agent-ops/audits/<run-id>/`, one markdown file per seat, plus the
 exact payload that was sent. Read them with the playbook's rules in hand: verify every
 finding, treat single-seat findings as leads, and never accept a truncated report as clean.
+
+Then close the loop — record what each finding turned out to be, and the panel starts
+reporting its own error rate:
+
+```bash
+PYTHONPATH=<plugin>/core python3 -m agent_ops verdict <run-id> <family> <n> confirmed|fp --note "why"
+PYTHONPATH=<plugin>/core python3 -m agent_ops stats        # per-seat / per-coder false-positive rates
+```
 
 ## Hook configuration (optional — sane defaults apply with none)
 
