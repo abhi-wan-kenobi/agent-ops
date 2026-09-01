@@ -69,6 +69,12 @@ AUDIT COMPLETE - <n> findings
 {PROBE_DIFF}
 """
 
+# What a probe actually measured: latency on THIS many chars of prompt. A cap derived
+# from it must scale before being applied to a payload orders of magnitude larger —
+# dogfood finding 2026-09-01: a constant 6x of probe latency killed a healthy seat at
+# 120s that finishes the same real payload in 113s.
+PROBE_PROMPT_CHARS = len(PROMPT)
+
 SEV_RE = re.compile(r"^\s*SEVERITY\s*:", re.M | re.I)
 DONE_RE = re.compile(r"AUDIT COMPLETE", re.I)
 

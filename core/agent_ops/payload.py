@@ -25,31 +25,46 @@ def run_git(args: list[str], cwd: pathlib.Path) -> str:
 
 
 def split_diff_blocks(diff: str) -> list[tuple[str | None, str]]:
-    """Split a unified diff into (path, block) pairs, one per file, in diff order."""
+    """Split a unified diff into (path, block) pairs, one per file, in diff order.
+
+    Path comes from the '+++ b/<path>' header. For a deleted file that header is
+    '+++ /dev/null', so fall back to the '--- a/<path>' line — otherwise deletions get a
+    None path, never reach the files list, and a deletion-only scope reads as "no diff".
+    Only the first '--- a/' per block is trusted (it precedes '+++' in the header; later
+    matches could be removed content lines), and it is used only when '+++' is /dev/null.
+    """
     blocks: list[tuple[str | None, str]] = []
     cur: list[str] = []
     path: str | None = None
+    old_path: str | None = None
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             if cur:
                 blocks.append((path, "\n".join(cur)))
-            cur, path = [line], None
+            cur, path, old_path = [line], None, None
         else:
             cur.append(line)
+        if old_path is None and line.startswith("--- a/"):
+            old_path = line[6:]
         if line.startswith("+++ b/"):
             path = line[6:]
+        elif line == "+++ /dev/null" and path is None:
+            path = old_path
     if cur:
         blocks.append((path, "\n".join(cur)))
     return blocks
 
 
 def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
-                  max_payload: int = DEFAULT_MAX_PAYLOAD) -> tuple[str, list[str], str]:
+                  max_payload: int = DEFAULT_MAX_PAYLOAD, *,
+                  exact: bool = False) -> tuple[str, list[str], str]:
     """Return (payload, files, description). Payload = diff + full text of changed files.
 
     `only` narrows to files whose path contains that substring — essential, not optional,
     for multi-file changes: splitting is the difference between a real review and one that
-    silently overruns a seat.
+    silently overruns a seat. `exact` makes it a whole-path match instead: --split-by-file
+    feeds paths taken FROM the diff back in, and substring matching would silently drag a
+    second file along whenever one path contains another (x.py vs x.py.orig).
 
     A brand-new file is the one case `only` cannot help, because a new file's diff IS its
     full text with every line prefixed '+', so inlining both doubles the payload for zero
@@ -70,8 +85,8 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
     blocks = split_diff_blocks(diff)
     files = sorted({p for p, _ in blocks if p})
     if only:
-        files = [f for f in files if only in f]
-        desc += f" (only files matching {only!r})"
+        files = [f for f in files if (f == only if exact else only in f)]
+        desc += f" (only {only!r})" if exact else f" (only files matching {only!r})"
         # Keep just the hunks for the selected files, so the diff shrinks with the file
         # list rather than dragging the whole change along and defeating the point.
         blocks = [(p, b) for p, b in blocks if p in files]

@@ -1,6 +1,6 @@
 {
   "name": "agent-ops",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Adversarial review for AI-written code: a multi-model audit panel, safety-rail hooks, and the operating rules for when the reviewers themselves are wrong.",
   "author": {
     "name": "Abhishek Gupta",

@@ -11,6 +11,7 @@ import argparse
 import concurrent.futures as cf
 import os
 import pathlib
+import re
 import signal
 import sys
 import time
@@ -18,12 +19,47 @@ import time
 from . import run_state
 from .classify import SECRET_RE, classify_seat
 from .config import Config, ConfigError, Seat, load_config
+from .init_cmd import run_init
 from .lease import Lease
-from .panel import family_of, load_seats, pick_panel
+from .panel import family_of, load_probe_seconds, load_seats, pick_panel
 from .payload import SEAT_NOTE_CHARS, build_payload
-from .probe import run_probe
+from .probe import PROBE_PROMPT_CHARS, run_probe
 from .providers import BaseProvider, make_provider
 from .report import PROMPT_HEAD, append_stats, write_payload, write_seat_report
+from .stats import run_stats, run_verdict
+
+DEFAULT_TIMEOUT = 900
+# Probe-informed cap: ~6x the seat's measured probe latency, SCALED by how much bigger
+# the real payload is than the probe prompt, floored, and never ABOVE the default budget
+# — this exists to fail hung seats in minutes, not to grant extensions. An explicit
+# --timeout overrides all of it.
+#
+# The scale factor is load-bearing, not decoration. Dogfood finding 2026-09-01, measured
+# twice on the same seat and payload: probed at 15.8s, a constant 6x floored to 120s
+# killed at 120.1s a review the seat completes in 112.9s — on a payload only 2.3% of
+# max_payload. Probe latency is measured on ~1k chars; real payloads run to 400k, and no
+# constant multiplier spans that range. Linear-in-input scaling is deliberately generous
+# (latency grows sublinearly with input), so the cap tightens only where the probe is
+# actually predictive: payloads near probe size.
+TIMEOUT_MULTIPLIER = 6
+TIMEOUT_FLOOR = 120
+
+
+def seat_timeouts(panel: list[Seat], probed: dict[str, float], explicit: int | None,
+                  payload_chars: int) -> dict[str, int]:
+    """Per-seat timeout in seconds, keyed by seat name."""
+    if explicit is not None:
+        return {s.name: explicit for s in panel}
+    scale = max(1.0, payload_chars / PROBE_PROMPT_CHARS)
+    out: dict[str, int] = {}
+    for s in panel:
+        secs = probed.get(s.name)
+        if secs is None:
+            out[s.name] = DEFAULT_TIMEOUT
+        else:
+            out[s.name] = min(DEFAULT_TIMEOUT,
+                              max(TIMEOUT_FLOOR, int(secs * TIMEOUT_MULTIPLIER * scale)))
+    return out
 
 
 def claim_run_dir(root: pathlib.Path, attempts: int = 50) -> tuple[str, pathlib.Path]:
@@ -125,6 +161,136 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
     return results, False
 
 
+def _subdir_name(index: int, path: str) -> str:
+    """Filesystem-safe per-file report dir. The index prefix keeps names unique even when
+    sanitising collapses two paths to the same string."""
+    return f"{index:02d}-" + re.sub(r"[^A-Za-z0-9._-]", "__", path)[:80]
+
+
+def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
+                 outdir: pathlib.Path, files: list[str], panel: list[Seat],
+                 providers: dict[str, BaseProvider], probed: dict[str, float],
+                 focus: str) -> int:
+    """--split-by-file: one panel per changed file, sequentially, under the ONE lease the
+    caller already holds. Replaces the hand-written shell loop the v0.1 build needed.
+
+    Sequential on purpose: the lease exists because concurrency against a rate-limited
+    endpoint queues silently until seats blow their budgets, and running N files' panels
+    at once is that same failure with extra steps.
+
+    Each file gets its own subdir (reports + the exact PAYLOAD.txt that left) and its own
+    stats line under `<run-id>/<subdir>`, because verdicts must land on the per-file
+    report a human actually read — an aggregate line would make finding numbers ambiguous
+    across files.
+    """
+    per_file: list[dict] = []                 # {"file", "sub", "results"|None, "why"}
+    cancelled = False
+    for i, f in enumerate(files, 1):
+        if run_state.cancel_requested(run_id):
+            cancelled = True
+            break
+        # A crash on one file must skip THAT file, not escape the loop — an escaped
+        # exception bypasses finish_run and strands the record as "running" while the
+        # remaining files silently go unreviewed. Mirrors safe_runner's reasoning.
+        # Panel finding, 2026-09-01.
+        try:
+            payload, _, desc = build_payload(repo, a.scope, f, config.max_payload,
+                                             exact=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f">> [{i}/{len(files)}] {f}: payload build failed — "
+                  f"{type(e).__name__}: {e} — SKIPPED", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "error"})
+            continue
+        if not payload.strip():
+            print(f">> [{i}/{len(files)}] {f}: produced no payload — SKIPPED "
+                  f"(changed since discovery?)", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "empty"})
+            continue
+        # The whole-scope gate already ran, but it scanned a payload that may have been
+        # TRUNCATED at max_payload — a secret past the cut would sail through. Gate the
+        # exact per-file text that is about to leave; skip that file, keep reviewing.
+        if SECRET_RE.search(payload):
+            print(f">> [{i}/{len(files)}] {f}: ⛔ SKIPPED — looks like it contains a live "
+                  f"credential. Remove it and re-run this file.", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "secret"})
+            continue
+        sub = _subdir_name(i, f)
+        subdir = outdir / sub
+        subdir.mkdir(parents=True, exist_ok=True)
+        write_payload(subdir, payload)
+        prompt = f"{PROMPT_HEAD}{focus}\nSCOPE: {desc} in {repo.name}\n\n{payload}"
+        # Per-file caps from THIS file's payload size — a 200-char deletion and a 30k
+        # module in the same run must not share one cap.
+        timeouts = seat_timeouts(panel, probed, a.timeout, len(payload))
+        capped = [f"{s.name} {timeouts[s.name]}s" for s in panel
+                  if timeouts[s.name] != DEFAULT_TIMEOUT] if a.timeout is None else []
+        print(f">> [{i}/{len(files)}] {f} ({len(payload):,} chars"
+              + (f"; probed caps: {', '.join(capped)}" if capped else "") + ")",
+              file=sys.stderr)
+        results, cancelled = run_panel_cooperatively(
+            run_id, panel,
+            lambda s: run_seat(providers[s.provider], s, prompt, subdir,
+                               timeouts[s.name], config.max_tokens))
+        for r in results:
+            if r["findings"] is None:
+                print(f"   {r['family']:10} ⛔ DID NOT RUN — {r['reason']} "
+                      f"({r['seconds']}s)", file=sys.stderr)
+            else:
+                flag = "  ⚠️ TRUNCATED" if r["truncated"] else ""
+                print(f"   {r['family']:10} {r['findings']} findings  "
+                      f"({r['seconds']}s){flag}", file=sys.stderr)
+        append_stats(config.stats_path, run_id=f"{run_id}/{sub}", repo_name=repo.name,
+                     scope=desc, files=1, payload_chars=len(payload), coder=a.coder,
+                     seats=results, parent=run_id)
+        per_file.append({"file": f, "sub": sub, "results": results, "why": None})
+        if cancelled:
+            break
+
+    if cancelled:
+        note = (run_state.read_run(run_id) or {}).get("note")
+        run_state.finish_run(run_id, "cancelled", note=note)
+        print(f"\n>> CANCELLED after {len(per_file)} of {len(files)} files — later files "
+              f"were never reviewed.", file=sys.stderr)
+        return 8
+
+    # One summary for the whole run — the point of the flag. Per-file quorum is judged
+    # the same way as a single run's: a file where <2 seats reported is a lead-quality
+    # review of THAT file, and a file where none reported was not reviewed at all.
+    reviewed = [pf for pf in per_file if pf["results"] is not None]
+    skipped = [pf for pf in per_file if pf["results"] is None]
+    unreviewed = [pf for pf in reviewed
+                  if not any(r["findings"] is not None for r in pf["results"])]
+    thin = [pf for pf in reviewed
+            if 0 < len([r for r in pf["results"] if r["findings"] is not None]) < 2]
+    print(f"\n>> summary  : {len(reviewed)} file(s) reviewed"
+          + (f", {len(skipped)} skipped" if skipped else ""), file=sys.stderr)
+    for pf in reviewed:
+        counts = ", ".join(
+            f"{r['family']} {'—' if r['findings'] is None else r['findings']}"
+            for r in pf["results"])
+        print(f"   {pf['file']}: {counts}   (verdicts: {run_id}/{pf['sub']})",
+              file=sys.stderr)
+    for pf in skipped:
+        print(f"   {pf['file']}: SKIPPED ({pf['why']}) — NOT reviewed", file=sys.stderr)
+    if unreviewed:
+        print(f"\n>> ⛔ {len(unreviewed)} file(s) got NO report at all — those files were "
+              f"not reviewed. Not clean.", file=sys.stderr)
+    if thin:
+        print(f">> ⚠️ {len(thin)} file(s) had only one reporting seat — leads, not "
+              f"agreement. Re-run the missing seats before treating them as done.",
+              file=sys.stderr)
+    print(f"\n>> reports in {outdir}/ (one subdir per file)", file=sys.stderr)
+    print(">> NEXT: read each file's reports and cross-reference; verify every finding\n"
+          "   against the real code, then close the loop per finding:\n"
+          f"   python3 -m agent_ops verdict {run_id}/<subdir> <family> <n> confirmed|fp",
+          file=sys.stderr)
+
+    ok = bool(reviewed) and not skipped and not unreviewed
+    run_state.finish_run(run_id, "done" if ok else "failed", exit_code=0 if ok else 1,
+                         error=None if ok else "not every file was fully reviewed")
+    return 0 if ok else 1
+
+
 def _make_cancel_signal_handler(run_id: str):
     """A killed run must not leave a permanently "running"/"queued" record.
 
@@ -150,9 +316,16 @@ def audit(argv: list[str]) -> int:
                                      "id (overrides rotation AND coder exclusion)")
     ap.add_argument("--seats", type=int, default=2)
     ap.add_argument("--focus")
-    ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--timeout", type=int, default=None,
+                    help=f"per-seat wall clock in seconds (default: {DEFAULT_TIMEOUT}, or "
+                         f"~{TIMEOUT_MULTIPLIER}x the seat's probed latency when a fresh "
+                         f"roster has one)")
     ap.add_argument("--only", help="review only files whose path contains this substring "
                                    "(use it — split large changes)")
+    ap.add_argument("--split-by-file", action="store_true",
+                    help="one panel per changed file, sequentially, under one lease — "
+                         "the multi-file discipline as a single command instead of a "
+                         "hand-written loop (combines with --only, which narrows first)")
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("--config", help="panel.toml path (default ~/.agent-ops/panel.toml)")
     a = ap.parse_args(argv)
@@ -233,6 +406,9 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
 
+    probed = load_probe_seconds(config)
+    timeouts = seat_timeouts(panel, probed, a.timeout, len(payload))
+
     # The run record is created BEFORE the lease is requested, so a run waiting behind
     # another panel is visible as "queued" rather than not existing yet.
     run_id, outdir = claim_run_dir(config.outroot)
@@ -265,7 +441,6 @@ def audit(argv: list[str]) -> int:
                              lease={"held": held, "waiting_since": None,
                                     "held_since": time.time() if held else None})
 
-        write_payload(outdir, payload)
         focus = f"\nPARTICULAR FOCUS: {a.focus}\n" if a.focus else ""
         prompt = f"{PROMPT_HEAD}{focus}\nSCOPE: {desc} in {repo.name}\n\n{payload}"
 
@@ -275,6 +450,15 @@ def audit(argv: list[str]) -> int:
         print(f">> coder    : {a.coder or '(unspecified)'}", file=sys.stderr)
         print(f">> panel    : {', '.join(f'{s.name} ({s.model})' for s in panel)}",
               file=sys.stderr)
+        # Name each cap out loud: a seat killed at 4 minutes must be explainable from the
+        # run's own output, not from reading the roster and doing the arithmetic by hand.
+        # (Split mode recomputes per file from that file's payload and prints there.)
+        if not a.split_by_file:
+            print(f">> timeouts : "
+                  + ", ".join(f"{s.name} {timeouts[s.name]}s"
+                              + (" (probed)" if a.timeout is None
+                                 and timeouts[s.name] != DEFAULT_TIMEOUT else "")
+                              for s in panel), file=sys.stderr)
         # Say where the panel came from. A silent fallback is exactly how a stale roster
         # stays invisible. --models bypasses the roster, so naming it there would be a lie.
         print(f">> seats from: {'--models (explicit)' if a.models else provenance}",
@@ -283,10 +467,18 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
 
         run_state.set_panel(run_id, [(s.model, s.family) for s in panel])
+
+        if a.split_by_file:
+            print(f">> split    : one panel per file ({len(files)} files, sequential; "
+                  f"timeouts computed per file)", file=sys.stderr)
+            return _audit_split(a, config, repo, run_id, outdir, files, panel,
+                                providers, probed, focus)
+
+        write_payload(outdir, payload)
         results, cancelled = run_panel_cooperatively(
             run_id, panel,
             lambda s: run_seat(providers[s.provider], s, prompt, outdir,
-                               a.timeout, config.max_tokens))
+                               timeouts[s.name], config.max_tokens))
         if cancelled:
             note = (run_state.read_run(run_id) or {}).get("note")
             run_state.finish_run(run_id, "cancelled", note=note)
@@ -360,6 +552,16 @@ def _pop_config(argv: list[str]) -> tuple[str | None, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else ""
+    if cmd == "init":
+        return run_init(argv[1:])
+    if cmd in ("verdict", "stats"):
+        cfg_path, rest = _pop_config(argv[1:])
+        try:
+            stats_path = load_config(cfg_path).stats_path
+        except ConfigError as e:
+            print(f"CONFIG ERROR: {e}", file=sys.stderr)
+            return 2
+        return (run_verdict if cmd == "verdict" else run_stats)(stats_path, rest)
     if cmd == "probe":
         cfg_path, rest = _pop_config(argv[1:])
         json_out = "--json" in rest
