@@ -56,12 +56,15 @@ def split_diff_blocks(diff: str) -> list[tuple[str | None, str]]:
 
 
 def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
-                  max_payload: int = DEFAULT_MAX_PAYLOAD) -> tuple[str, list[str], str]:
+                  max_payload: int = DEFAULT_MAX_PAYLOAD, *,
+                  exact: bool = False) -> tuple[str, list[str], str]:
     """Return (payload, files, description). Payload = diff + full text of changed files.
 
     `only` narrows to files whose path contains that substring — essential, not optional,
     for multi-file changes: splitting is the difference between a real review and one that
-    silently overruns a seat.
+    silently overruns a seat. `exact` makes it a whole-path match instead: --split-by-file
+    feeds paths taken FROM the diff back in, and substring matching would silently drag a
+    second file along whenever one path contains another (x.py vs x.py.orig).
 
     A brand-new file is the one case `only` cannot help, because a new file's diff IS its
     full text with every line prefixed '+', so inlining both doubles the payload for zero
@@ -82,8 +85,8 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
     blocks = split_diff_blocks(diff)
     files = sorted({p for p, _ in blocks if p})
     if only:
-        files = [f for f in files if only in f]
-        desc += f" (only files matching {only!r})"
+        files = [f for f in files if (f == only if exact else only in f)]
+        desc += f" (only {only!r})" if exact else f" (only files matching {only!r})"
         # Keep just the hunks for the selected files, so the diff shrinks with the file
         # list rather than dragging the whole change along and defeating the point.
         blocks = [(p, b) for p, b in blocks if p in files]

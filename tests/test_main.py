@@ -400,3 +400,115 @@ def test_probed_timeouts_are_named_in_the_run_output(env, capsys):
     err = capsys.readouterr().err
     assert "seat-a 120s (probed)" in err
     assert "seat-b 360s (probed)" in err
+
+
+# --- --split-by-file (v0.2) ----------------------------------------------------------------
+
+def _second_file(repo, name="b.py", content="z = 3\n"):
+    (repo / name).write_text(content, encoding="utf-8")
+    subprocess.run(["git", "add", name], cwd=repo, check=True)
+
+
+def test_split_by_file_reviews_each_file_under_one_run(env, capsys):
+    repo, cfg, tmp = env
+    _second_file(repo)
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 0
+    err = capsys.readouterr().err
+
+    rec = run_state.list_runs()[0]
+    assert rec["state"] == "done" and rec["exit_code"] == 0
+    outdir = pathlib.Path(rec["outdir"])
+    subdirs = sorted(d.name for d in outdir.iterdir() if d.is_dir())
+    assert subdirs == ["01-a.py", "02-b.py"]
+    for sub in subdirs:
+        assert (outdir / sub / "PAYLOAD.txt").is_file()
+        assert (outdir / sub / "fam-a.md").is_file()
+        assert (outdir / sub / "fam-b.md").is_file()
+
+    # One stats line per FILE, each pointing back at the parent run, so verdicts can
+    # land on the per-file report the human actually read.
+    lines = [json.loads(l) for l in
+             (tmp / "state" / "stats.jsonl").read_text().strip().splitlines()]
+    assert [l["run"] for l in lines] == [f"{rec['run_id']}/01-a.py",
+                                         f"{rec['run_id']}/02-b.py"]
+    assert all(l["parent"] == rec["run_id"] for l in lines)
+    assert "2 file(s) reviewed" in err
+    assert "verdicts: " in err
+
+
+def test_split_by_file_payloads_are_exact_per_file(env):
+    """Substring narrowing would drag xa.py into a.py's panel; exact match must not."""
+    repo, cfg, _ = env
+    _second_file(repo, "xa.py", "w = 9\n")
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 0
+    outdir = pathlib.Path(run_state.list_runs()[0]["outdir"])
+    a_payload = (outdir / "01-a.py" / "PAYLOAD.txt").read_text()
+    x_payload = (outdir / "02-xa.py" / "PAYLOAD.txt").read_text()
+    assert "xa.py" not in a_payload
+    assert "FULL FILE: a.py" not in x_payload and "FULL FILE: xa.py" in x_payload
+
+
+def test_split_by_file_verdict_targets_the_per_file_run(env):
+    from agent_ops.stats import append_verdict
+    repo, cfg, tmp = env
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 0
+    run_id = run_state.list_runs()[0]["run_id"]
+    code, msg = append_verdict(tmp / "state" / "stats.jsonl", f"{run_id}/01-a.py",
+                               "fam-a", 1, "confirmed", None)
+    assert code == 0, msg
+
+
+def test_split_by_file_dead_panel_on_one_file_fails_the_run(env, fake_provider, capsys):
+    repo, cfg, _ = env
+    _second_file(repo)
+    calls = {"n": 0}
+    real_outputs = {"model-a": SeatOutput(content=GOOD_REPORT),
+                    "model-b": SeatOutput(content=GOOD_REPORT)}
+
+    def on_call(model):
+        # First file's panel (2 calls) is healthy; from the second file on, every seat
+        # errors out.
+        calls["n"] += 1
+        if calls["n"] > 2:
+            fake_provider.outputs = {m: SeatOutput(content="", error="boom")
+                                     for m in real_outputs}
+    fake_provider.outputs = dict(real_outputs)
+    fake_provider.on_call = on_call
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "got NO report at all" in err
+    assert run_state.list_runs()[0]["state"] == "failed"
+
+
+def test_split_by_file_skips_a_file_with_a_secret_but_reviews_the_rest(
+        env, fake_provider, capsys, monkeypatch):
+    """The whole-scope gate refuses everything; the per-file gate exists for payloads the
+    whole-scope scan could not have seen because of truncation. Simulate by letting the
+    whole-scope pass and asserting the per-file gate still fires."""
+    from agent_ops import main as mm
+    repo, cfg, _ = env
+    _second_file(repo, "leak.py", "token = '" + "ghp_" + "a" * 24 + "'\n")
+    sent: list[str] = []
+    fake_provider.on_call = sent.append
+
+    real_search = mm.SECRET_RE.search
+    gate = {"first": True}
+
+    class OneEyedGate:
+        def search(self, text):
+            if gate["first"]:               # the whole-scope scan: pretend truncation hid it
+                gate["first"] = False
+                return None
+            return real_search(text)
+    monkeypatch.setattr(mm, "SECRET_RE", OneEyedGate())
+
+    rc = main(_argv(repo, cfg, "--split-by-file"))
+    assert rc == 1, "a skipped file is not a fully reviewed run"
+    err = capsys.readouterr().err
+    assert "SKIPPED" in err and "credential" in err
+    assert "1 file(s) reviewed" in err and "1 skipped" in err
+    assert len(sent) == 2, "only the clean file's panel may have been called"

@@ -11,6 +11,7 @@ import argparse
 import concurrent.futures as cf
 import os
 import pathlib
+import re
 import signal
 import sys
 import time
@@ -151,6 +152,118 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
     return results, False
 
 
+def _subdir_name(index: int, path: str) -> str:
+    """Filesystem-safe per-file report dir. The index prefix keeps names unique even when
+    sanitising collapses two paths to the same string."""
+    return f"{index:02d}-" + re.sub(r"[^A-Za-z0-9._-]", "__", path)[:80]
+
+
+def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
+                 outdir: pathlib.Path, files: list[str], panel: list[Seat],
+                 providers: dict[str, BaseProvider], timeouts: dict[str, int],
+                 focus: str) -> int:
+    """--split-by-file: one panel per changed file, sequentially, under the ONE lease the
+    caller already holds. Replaces the hand-written shell loop the v0.1 build needed.
+
+    Sequential on purpose: the lease exists because concurrency against a rate-limited
+    endpoint queues silently until seats blow their budgets, and running N files' panels
+    at once is that same failure with extra steps.
+
+    Each file gets its own subdir (reports + the exact PAYLOAD.txt that left) and its own
+    stats line under `<run-id>/<subdir>`, because verdicts must land on the per-file
+    report a human actually read — an aggregate line would make finding numbers ambiguous
+    across files.
+    """
+    per_file: list[dict] = []                 # {"file", "sub", "results"|None, "why"}
+    cancelled = False
+    for i, f in enumerate(files, 1):
+        if run_state.cancel_requested(run_id):
+            cancelled = True
+            break
+        payload, _, desc = build_payload(repo, a.scope, f, config.max_payload, exact=True)
+        if not payload.strip():
+            print(f">> [{i}/{len(files)}] {f}: produced no payload — SKIPPED "
+                  f"(changed since discovery?)", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "empty"})
+            continue
+        # The whole-scope gate already ran, but it scanned a payload that may have been
+        # TRUNCATED at max_payload — a secret past the cut would sail through. Gate the
+        # exact per-file text that is about to leave; skip that file, keep reviewing.
+        if SECRET_RE.search(payload):
+            print(f">> [{i}/{len(files)}] {f}: ⛔ SKIPPED — looks like it contains a live "
+                  f"credential. Remove it and re-run this file.", file=sys.stderr)
+            per_file.append({"file": f, "sub": None, "results": None, "why": "secret"})
+            continue
+        sub = _subdir_name(i, f)
+        subdir = outdir / sub
+        subdir.mkdir(parents=True, exist_ok=True)
+        write_payload(subdir, payload)
+        prompt = f"{PROMPT_HEAD}{focus}\nSCOPE: {desc} in {repo.name}\n\n{payload}"
+        print(f">> [{i}/{len(files)}] {f} ({len(payload):,} chars)", file=sys.stderr)
+        results, cancelled = run_panel_cooperatively(
+            run_id, panel,
+            lambda s: run_seat(providers[s.provider], s, prompt, subdir,
+                               timeouts[s.name], config.max_tokens))
+        for r in results:
+            if r["findings"] is None:
+                print(f"   {r['family']:10} ⛔ DID NOT RUN — {r['reason']} "
+                      f"({r['seconds']}s)", file=sys.stderr)
+            else:
+                flag = "  ⚠️ TRUNCATED" if r["truncated"] else ""
+                print(f"   {r['family']:10} {r['findings']} findings  "
+                      f"({r['seconds']}s){flag}", file=sys.stderr)
+        append_stats(config.stats_path, run_id=f"{run_id}/{sub}", repo_name=repo.name,
+                     scope=desc, files=1, payload_chars=len(payload), coder=a.coder,
+                     seats=results, parent=run_id)
+        per_file.append({"file": f, "sub": sub, "results": results, "why": None})
+        if cancelled:
+            break
+
+    if cancelled:
+        note = (run_state.read_run(run_id) or {}).get("note")
+        run_state.finish_run(run_id, "cancelled", note=note)
+        print(f"\n>> CANCELLED after {len(per_file)} of {len(files)} files — later files "
+              f"were never reviewed.", file=sys.stderr)
+        return 8
+
+    # One summary for the whole run — the point of the flag. Per-file quorum is judged
+    # the same way as a single run's: a file where <2 seats reported is a lead-quality
+    # review of THAT file, and a file where none reported was not reviewed at all.
+    reviewed = [pf for pf in per_file if pf["results"] is not None]
+    skipped = [pf for pf in per_file if pf["results"] is None]
+    unreviewed = [pf for pf in reviewed
+                  if not any(r["findings"] is not None for r in pf["results"])]
+    thin = [pf for pf in reviewed
+            if 0 < len([r for r in pf["results"] if r["findings"] is not None]) < 2]
+    print(f"\n>> summary  : {len(reviewed)} file(s) reviewed"
+          + (f", {len(skipped)} skipped" if skipped else ""), file=sys.stderr)
+    for pf in reviewed:
+        counts = ", ".join(
+            f"{r['family']} {'—' if r['findings'] is None else r['findings']}"
+            for r in pf["results"])
+        print(f"   {pf['file']}: {counts}   (verdicts: {run_id}/{pf['sub']})",
+              file=sys.stderr)
+    for pf in skipped:
+        print(f"   {pf['file']}: SKIPPED ({pf['why']}) — NOT reviewed", file=sys.stderr)
+    if unreviewed:
+        print(f"\n>> ⛔ {len(unreviewed)} file(s) got NO report at all — those files were "
+              f"not reviewed. Not clean.", file=sys.stderr)
+    if thin:
+        print(f">> ⚠️ {len(thin)} file(s) had only one reporting seat — leads, not "
+              f"agreement. Re-run the missing seats before treating them as done.",
+              file=sys.stderr)
+    print(f"\n>> reports in {outdir}/ (one subdir per file)", file=sys.stderr)
+    print(">> NEXT: read each file's reports and cross-reference; verify every finding\n"
+          "   against the real code, then close the loop per finding:\n"
+          f"   python3 -m agent_ops verdict {run_id}/<subdir> <family> <n> confirmed|fp",
+          file=sys.stderr)
+
+    ok = bool(reviewed) and not skipped and not unreviewed
+    run_state.finish_run(run_id, "done" if ok else "failed", exit_code=0 if ok else 1,
+                         error=None if ok else "not every file was fully reviewed")
+    return 0 if ok else 1
+
+
 def _make_cancel_signal_handler(run_id: str):
     """A killed run must not leave a permanently "running"/"queued" record.
 
@@ -182,6 +295,10 @@ def audit(argv: list[str]) -> int:
                          f"roster has one)")
     ap.add_argument("--only", help="review only files whose path contains this substring "
                                    "(use it — split large changes)")
+    ap.add_argument("--split-by-file", action="store_true",
+                    help="one panel per changed file, sequentially, under one lease — "
+                         "the multi-file discipline as a single command instead of a "
+                         "hand-written loop (combines with --only, which narrows first)")
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("--config", help="panel.toml path (default ~/.agent-ops/panel.toml)")
     a = ap.parse_args(argv)
@@ -296,7 +413,6 @@ def audit(argv: list[str]) -> int:
                              lease={"held": held, "waiting_since": None,
                                     "held_since": time.time() if held else None})
 
-        write_payload(outdir, payload)
         focus = f"\nPARTICULAR FOCUS: {a.focus}\n" if a.focus else ""
         prompt = f"{PROMPT_HEAD}{focus}\nSCOPE: {desc} in {repo.name}\n\n{payload}"
 
@@ -321,6 +437,14 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
 
         run_state.set_panel(run_id, [(s.model, s.family) for s in panel])
+
+        if a.split_by_file:
+            print(f">> split    : one panel per file ({len(files)} files, sequential)",
+                  file=sys.stderr)
+            return _audit_split(a, config, repo, run_id, outdir, files, panel,
+                                providers, timeouts, focus)
+
+        write_payload(outdir, payload)
         results, cancelled = run_panel_cooperatively(
             run_id, panel,
             lambda s: run_seat(providers[s.provider], s, prompt, outdir,

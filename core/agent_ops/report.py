@@ -71,15 +71,22 @@ def write_payload(outdir: pathlib.Path, payload: str) -> None:
 
 def append_stats(stats_path: pathlib.Path, *, run_id: str, repo_name: str, scope: str,
                  files: int, payload_chars: int, coder: str | None,
-                 seats: list[dict]) -> None:
+                 seats: list[dict], parent: str | None = None) -> None:
     """One line per run. `findings: null` for a seat that never ran — the difference
-    between "looked and found nothing" and "never looked" must survive into the stats."""
+    between "looked and found nothing" and "never looked" must survive into the stats.
+
+    A --split-by-file run writes one line per FILE (run id `<parent>/<subdir>`, `parent`
+    set): each file convenes its own panel, and verdicts must land on the per-file
+    reports the human actually read, not on an aggregate that has no report files."""
     stats_path.parent.mkdir(parents=True, exist_ok=True)
+    line = {
+        # `kind` discriminates run lines from verdict lines (stats.py) in the shared
+        # file; v0.1 lines lack it, and readers must treat absent as "run".
+        "ts": int(time.time()), "kind": "run", "run": run_id, "repo": repo_name,
+        "scope": scope, "files": files, "payload_chars": payload_chars,
+        "coder": coder, "seats": seats,
+    }
+    if parent:
+        line["parent"] = parent
     with stats_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            # `kind` discriminates run lines from verdict lines (stats.py) in the shared
-            # file; v0.1 lines lack it, and readers must treat absent as "run".
-            "ts": int(time.time()), "kind": "run", "run": run_id, "repo": repo_name,
-            "scope": scope, "files": files, "payload_chars": payload_chars,
-            "coder": coder, "seats": seats,
-        }) + "\n")
+        fh.write(json.dumps(line) + "\n")
