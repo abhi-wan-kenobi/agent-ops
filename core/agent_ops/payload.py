@@ -25,19 +25,31 @@ def run_git(args: list[str], cwd: pathlib.Path) -> str:
 
 
 def split_diff_blocks(diff: str) -> list[tuple[str | None, str]]:
-    """Split a unified diff into (path, block) pairs, one per file, in diff order."""
+    """Split a unified diff into (path, block) pairs, one per file, in diff order.
+
+    Path comes from the '+++ b/<path>' header. For a deleted file that header is
+    '+++ /dev/null', so fall back to the '--- a/<path>' line — otherwise deletions get a
+    None path, never reach the files list, and a deletion-only scope reads as "no diff".
+    Only the first '--- a/' per block is trusted (it precedes '+++' in the header; later
+    matches could be removed content lines), and it is used only when '+++' is /dev/null.
+    """
     blocks: list[tuple[str | None, str]] = []
     cur: list[str] = []
     path: str | None = None
+    old_path: str | None = None
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             if cur:
                 blocks.append((path, "\n".join(cur)))
-            cur, path = [line], None
+            cur, path, old_path = [line], None, None
         else:
             cur.append(line)
+        if old_path is None and line.startswith("--- a/"):
+            old_path = line[6:]
         if line.startswith("+++ b/"):
             path = line[6:]
+        elif line == "+++ /dev/null" and path is None:
+            path = old_path
     if cur:
         blocks.append((path, "\n".join(cur)))
     return blocks

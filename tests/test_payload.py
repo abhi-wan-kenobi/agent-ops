@@ -97,6 +97,47 @@ def test_unreadable_new_file_keeps_its_hunks(tmp_path):
         "now invisible in the payload")
 
 
+def test_deletion_only_diff_is_reviewed_not_empty(tmp_path):
+    """Regression: a deleted file's header is '+++ /dev/null', so its path used to stay
+    None, the files list came back empty, and main() declared 'nothing to review' for a
+    scope whose whole point was the deletion."""
+    repo = _repo(tmp_path, {"doomed.py": BODY}, {})
+    (repo / "doomed.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                   capture_output=True, text=True)
+    payload, files, _ = build_payload(repo, "uncommitted")
+    assert files == ["doomed.py"], files
+    assert payload.strip(), "deletion-only scope produced an empty payload"
+    assert "-line 0 of a file" in payload, "the deletion hunks must ship"
+    assert "===== FULL FILE: doomed.py" not in payload, "cannot inline a file that is gone"
+
+
+def test_mixed_edit_and_deletion_keeps_both(tmp_path):
+    repo = _repo(tmp_path, {"mod.py": "a\nb\nc\n", "gone.py": BODY},
+                 {"mod.py": "a\nCHANGED\nc\n"})
+    (repo / "gone.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                   capture_output=True, text=True)
+    payload, files, _ = build_payload(repo, "uncommitted")
+    assert files == ["gone.py", "mod.py"], files
+    assert "+CHANGED" in payload, "the edited file's hunk was dropped"
+    assert "-line 0 of a file" in payload, "the deleted file's hunks were dropped"
+    assert "===== FULL FILE: mod.py" in payload
+    assert "===== FULL FILE: gone.py" not in payload, "cannot inline a file that is gone"
+
+
+def test_only_narrows_to_a_deleted_file(tmp_path):
+    repo = _repo(tmp_path, {"mod.py": "a\n", "gone.py": BODY}, {"mod.py": "a\nAAA\n"})
+    (repo / "gone.py").unlink()
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                   capture_output=True, text=True)
+    payload, files, desc = build_payload(repo, "uncommitted", only="gone")
+    assert files == ["gone.py"], files
+    assert "-line 0 of a file" in payload and "+AAA" not in payload, (
+        "only= must narrow hunks when the match is a deletion")
+    assert "only files matching 'gone'" in desc, desc
+
+
 def test_only_narrows_files_and_hunks(tmp_path):
     repo = _repo(tmp_path, {"a.py": "a\n", "b.py": "b\n"},
                  {"a.py": "a\nAAA\n", "b.py": "b\nBBB\n"})
