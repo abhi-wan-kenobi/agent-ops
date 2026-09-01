@@ -370,7 +370,8 @@ def test_seat_timeouts_cap_at_multiplier_with_floor_and_ceiling():
                                 seat_timeouts)
     panel = [_mkseat("fast"), _mkseat("mid"), _mkseat("slow"), _mkseat("unprobed")]
     probed = {"fast": 5.0, "mid": 60.0, "slow": 400.0}
-    t = seat_timeouts(panel, probed, explicit=None)
+    # A probe-sized payload: scale is 1, so the raw multiplier/floor/ceiling show through.
+    t = seat_timeouts(panel, probed, explicit=None, payload_chars=100)
     assert t["fast"] == TIMEOUT_FLOOR, "a fast probe must not strangle a real review"
     assert t["mid"] == 60 * TIMEOUT_MULTIPLIER
     assert t["slow"] == DEFAULT_TIMEOUT, "probe-informed is a cap, never an extension"
@@ -379,8 +380,17 @@ def test_seat_timeouts_cap_at_multiplier_with_floor_and_ceiling():
 
 def test_explicit_timeout_overrides_probe_data():
     from agent_ops.main import seat_timeouts
-    t = seat_timeouts([_mkseat("fast")], {"fast": 5.0}, explicit=333)
+    t = seat_timeouts([_mkseat("fast")], {"fast": 5.0}, explicit=333, payload_chars=100)
     assert t["fast"] == 333
+
+
+def test_probe_cap_scales_with_payload_size():
+    """Dogfood finding, 2026-09-01 (measured twice, same seat, same payload): probed at
+    15.8s, the unscaled 6x cap floored to 120s and killed at 120.1s a 9,116-char review
+    the seat completes in 112.9s. The cap must grow with payload/probe size."""
+    from agent_ops.main import seat_timeouts
+    t = seat_timeouts([_mkseat("s")], {"s": 15.8}, explicit=None, payload_chars=9_116)
+    assert t["s"] > 200, f"cap {t['s']}s would still kill the measured 112.9s completion"
 
 
 def test_probed_timeouts_are_named_in_the_run_output(env, capsys):

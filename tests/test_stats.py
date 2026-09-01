@@ -166,3 +166,27 @@ def test_malformed_verdict_line_does_not_crash_stats(stats_path, capsys):
     summary = summarize(read_lines(stats_path))
     assert summary["seats"]["seat-a"]["judged"] == 0
     assert run_stats(stats_path, []) == 0
+
+
+def test_invalid_utf8_corrupts_one_line_not_the_whole_history(stats_path):
+    """Panel finding, 2026-09-01: read_lines raised UnicodeDecodeError on one bad byte,
+    taking every stats/verdict call down with it."""
+    with stats_path.open("ab") as fh:
+        fh.write(b'{"kind": "verdict", "note": "\xff\xfe"}\n')
+    append_stats(stats_path, run_id="run-2", repo_name="r", scope="s", files=1,
+                 payload_chars=5, coder="opus", seats=SEATS)
+    assert summarize(read_lines(stats_path))["coders"]["opus"]["runs"] == 2
+
+
+def test_unwritable_stats_file_is_a_refusal_not_a_traceback(tmp_path):
+    """Panel finding, 2026-09-01: uncaught OSError on the verdict append."""
+    import os
+    p = tmp_path / "stats.jsonl"
+    append_stats(p, run_id="run-1", repo_name="r", scope="s", files=1,
+                 payload_chars=5, coder="opus", seats=SEATS)
+    os.chmod(p, 0o400)
+    try:
+        code, msg = append_verdict(p, "run-1", "fam-a", 1, "confirmed", None)
+    finally:
+        os.chmod(p, 0o600)
+    assert code == 2 and "cannot write" in msg

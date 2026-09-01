@@ -23,25 +23,34 @@ from .init_cmd import run_init
 from .lease import Lease
 from .panel import family_of, load_probe_seconds, load_seats, pick_panel
 from .payload import SEAT_NOTE_CHARS, build_payload
-from .probe import run_probe
+from .probe import PROBE_PROMPT_CHARS, run_probe
 from .providers import BaseProvider, make_provider
 from .report import PROMPT_HEAD, append_stats, write_payload, write_seat_report
 from .stats import run_stats, run_verdict
 
 DEFAULT_TIMEOUT = 900
-# Probe-informed cap: ~6x the seat's measured probe latency, floored so a fast probe
-# never strangles a real review (payloads are far bigger than the probe diff), and never
-# ABOVE the default budget — this exists to fail dead-slow seats in minutes, not to grant
-# extensions. An explicit --timeout overrides all of it.
+# Probe-informed cap: ~6x the seat's measured probe latency, SCALED by how much bigger
+# the real payload is than the probe prompt, floored, and never ABOVE the default budget
+# — this exists to fail hung seats in minutes, not to grant extensions. An explicit
+# --timeout overrides all of it.
+#
+# The scale factor is load-bearing, not decoration. Dogfood finding 2026-09-01, measured
+# twice on the same seat and payload: probed at 15.8s, a constant 6x floored to 120s
+# killed at 120.1s a review the seat completes in 112.9s — on a payload only 2.3% of
+# max_payload. Probe latency is measured on ~1k chars; real payloads run to 400k, and no
+# constant multiplier spans that range. Linear-in-input scaling is deliberately generous
+# (latency grows sublinearly with input), so the cap tightens only where the probe is
+# actually predictive: payloads near probe size.
 TIMEOUT_MULTIPLIER = 6
 TIMEOUT_FLOOR = 120
 
 
-def seat_timeouts(panel: list[Seat], probed: dict[str, float],
-                  explicit: int | None) -> dict[str, int]:
+def seat_timeouts(panel: list[Seat], probed: dict[str, float], explicit: int | None,
+                  payload_chars: int) -> dict[str, int]:
     """Per-seat timeout in seconds, keyed by seat name."""
     if explicit is not None:
         return {s.name: explicit for s in panel}
+    scale = max(1.0, payload_chars / PROBE_PROMPT_CHARS)
     out: dict[str, int] = {}
     for s in panel:
         secs = probed.get(s.name)
@@ -49,7 +58,7 @@ def seat_timeouts(panel: list[Seat], probed: dict[str, float],
             out[s.name] = DEFAULT_TIMEOUT
         else:
             out[s.name] = min(DEFAULT_TIMEOUT,
-                              max(TIMEOUT_FLOOR, int(secs * TIMEOUT_MULTIPLIER)))
+                              max(TIMEOUT_FLOOR, int(secs * TIMEOUT_MULTIPLIER * scale)))
     return out
 
 
@@ -160,7 +169,7 @@ def _subdir_name(index: int, path: str) -> str:
 
 def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
                  outdir: pathlib.Path, files: list[str], panel: list[Seat],
-                 providers: dict[str, BaseProvider], timeouts: dict[str, int],
+                 providers: dict[str, BaseProvider], probed: dict[str, float],
                  focus: str) -> int:
     """--split-by-file: one panel per changed file, sequentially, under the ONE lease the
     caller already holds. Replaces the hand-written shell loop the v0.1 build needed.
@@ -210,7 +219,14 @@ def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
         subdir.mkdir(parents=True, exist_ok=True)
         write_payload(subdir, payload)
         prompt = f"{PROMPT_HEAD}{focus}\nSCOPE: {desc} in {repo.name}\n\n{payload}"
-        print(f">> [{i}/{len(files)}] {f} ({len(payload):,} chars)", file=sys.stderr)
+        # Per-file caps from THIS file's payload size — a 200-char deletion and a 30k
+        # module in the same run must not share one cap.
+        timeouts = seat_timeouts(panel, probed, a.timeout, len(payload))
+        capped = [f"{s.name} {timeouts[s.name]}s" for s in panel
+                  if timeouts[s.name] != DEFAULT_TIMEOUT] if a.timeout is None else []
+        print(f">> [{i}/{len(files)}] {f} ({len(payload):,} chars"
+              + (f"; probed caps: {', '.join(capped)}" if capped else "") + ")",
+              file=sys.stderr)
         results, cancelled = run_panel_cooperatively(
             run_id, panel,
             lambda s: run_seat(providers[s.provider], s, prompt, subdir,
@@ -390,7 +406,8 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
         return 2
 
-    timeouts = seat_timeouts(panel, load_probe_seconds(config), a.timeout)
+    probed = load_probe_seconds(config)
+    timeouts = seat_timeouts(panel, probed, a.timeout, len(payload))
 
     # The run record is created BEFORE the lease is requested, so a run waiting behind
     # another panel is visible as "queued" rather than not existing yet.
@@ -435,11 +452,13 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
         # Name each cap out loud: a seat killed at 4 minutes must be explainable from the
         # run's own output, not from reading the roster and doing the arithmetic by hand.
-        print(f">> timeouts : "
-              + ", ".join(f"{s.name} {timeouts[s.name]}s"
-                          + (" (probed)" if a.timeout is None
-                             and timeouts[s.name] != DEFAULT_TIMEOUT else "")
-                          for s in panel), file=sys.stderr)
+        # (Split mode recomputes per file from that file's payload and prints there.)
+        if not a.split_by_file:
+            print(f">> timeouts : "
+                  + ", ".join(f"{s.name} {timeouts[s.name]}s"
+                              + (" (probed)" if a.timeout is None
+                                 and timeouts[s.name] != DEFAULT_TIMEOUT else "")
+                              for s in panel), file=sys.stderr)
         # Say where the panel came from. A silent fallback is exactly how a stale roster
         # stays invisible. --models bypasses the roster, so naming it there would be a lie.
         print(f">> seats from: {'--models (explicit)' if a.models else provenance}",
@@ -450,10 +469,10 @@ def audit(argv: list[str]) -> int:
         run_state.set_panel(run_id, [(s.model, s.family) for s in panel])
 
         if a.split_by_file:
-            print(f">> split    : one panel per file ({len(files)} files, sequential)",
-                  file=sys.stderr)
+            print(f">> split    : one panel per file ({len(files)} files, sequential; "
+                  f"timeouts computed per file)", file=sys.stderr)
             return _audit_split(a, config, repo, run_id, outdir, files, panel,
-                                providers, timeouts, focus)
+                                providers, probed, focus)
 
         write_payload(outdir, payload)
         results, cancelled = run_panel_cooperatively(

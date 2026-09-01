@@ -21,9 +21,13 @@ and closing the loop on findings.
   lease, with per-file report subdirs, per-file stats lines (`<run-id>/<subdir>`, so
   verdicts land on the report a human actually read), and one summary.
 - **Probe-informed per-seat timeouts**: with a fresh roster, a seat is capped at ~6× its
-  measured probe latency (floor 120 s, ceiling the 900 s default), so a dead-slow seat
-  fails in minutes instead of burning the whole budget. Explicit `--timeout` overrides.
-  Caps are printed per seat in the run output.
+  measured probe latency, scaled by payload size ÷ probe-prompt size (floor 120 s,
+  ceiling the 900 s default), so a hung seat fails in minutes instead of burning the
+  whole budget. The scale factor is from a measured dogfood failure: an unscaled cap
+  killed at 120 s a healthy seat that completes the same 9 k-char review in 113 s —
+  probe latency is measured on ~1 k chars and no constant multiplier spans a 400 k-char
+  payload range. Explicit `--timeout` overrides. Caps are printed per seat (per file in
+  `--split-by-file` mode, from that file's own payload size).
 
 ### Fixed
 

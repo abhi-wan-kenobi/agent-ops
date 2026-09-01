@@ -33,7 +33,10 @@ def read_lines(stats_path: pathlib.Path) -> list[dict]:
     """Every parseable line, in file order. A corrupt line is skipped, not fatal: one bad
     write must not take the whole quality history with it."""
     try:
-        raw = stats_path.read_text(encoding="utf-8")
+        # errors="replace", not strict: one invalid byte (a torn write, a hand edit in
+        # the wrong encoding) must corrupt one line, not crash every stats/verdict call.
+        # Panel finding, 2026-09-01.
+        raw = stats_path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return []
     out: list[dict] = []
@@ -117,9 +120,14 @@ def append_verdict(stats_path: pathlib.Path, run_id: str, seat_key: str, finding
         "seat": row.get("seat"), "family": row.get("family"), "model": row.get("model"),
         "coder": run.get("coder"), "finding": finding, "verdict": verdict, "note": note,
     }
-    stats_path.parent.mkdir(parents=True, exist_ok=True)
-    with stats_path.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry) + "\n")
+    try:
+        stats_path.parent.mkdir(parents=True, exist_ok=True)
+        with stats_path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry) + "\n")
+    except OSError as e:
+        # Disk full / permissions is a user-visible refusal, not a traceback — same
+        # treatment the init write path got. Panel finding, 2026-09-01.
+        return 2, f"cannot write {stats_path}: {e}"
     msg = (f"recorded: {run_id} {row.get('family')} finding {finding} → {verdict}")
     if prior and prior.get("verdict") != verdict:
         msg += f" (supersedes earlier {prior.get('verdict')} — last verdict wins)"
