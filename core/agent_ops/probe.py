@@ -176,7 +176,15 @@ def rank(rows: list[dict]) -> list[dict]:
     def key(r: dict) -> tuple:
         ctx = r.get("ctx_tokens")
         narrow = 1 if (ctx is not None and ctx < MIN_CTX_TOKENS) else 0
+        # Stress health ranks right after the hard walls: a seat that stayed good at
+        # stress size beat one that went thin there ON THE DIMENSION REAL WORK EXERCISES,
+        # and a rank that ignored the stress record made the measurement decorative
+        # (audit finding, 2026-09-02). Absent stress data (stage skipped) is neutral,
+        # same reasoning as unknown ctx: unmeasured is not the same as bad.
+        stress_v = (r.get("stress") or {}).get("verdict")
+        stressed = 0 if stress_v in (None, "good") else 1
         return (narrow,
+                stressed,
                 -r.get("findings", 0),
                 r.get("reasoning_chars", 10**9),
                 -(ctx or 0))

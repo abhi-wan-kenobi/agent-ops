@@ -17,6 +17,9 @@ work, with measurements attached.
   size stays eligible. Stress failures are re-probed once before demoting.
 - **`reasoning_chars` per seat in stats run lines**, so reasoning volume per input size is
   measurable from `stats.jsonl` over time instead of only observable when a seat dies.
+- **Stress-aware ranking**: among seats that pass both probes, one that stayed `good` at
+  stress size ranks ahead of one that went thin there — otherwise the stress measurement
+  was decorative (audit finding). Absent stress data is neutral, like unknown context.
 
 ### Fixed
 

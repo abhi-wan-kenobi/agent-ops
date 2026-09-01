@@ -317,3 +317,23 @@ def test_only_good_seats_are_stress_probed(tmp_path, stub):
     assert "model-a" not in stub["provider"].stress_calls, (
         "a seat that never passed the small probe has nothing to stress")
     assert stub["provider"].stress_calls == ["model-b"]
+
+
+def test_rank_prefers_stress_good_over_stress_thin(tmp_path):
+    """Audit finding, 2026-09-02: rank() never inspected the stress record, so a seat
+    that went thin under stress ranked identically to one that stayed good there —
+    the measurement was decorative. Stress health now ranks after the hard walls."""
+    rows = [
+        {"model": "wilts", "seat": "a", "family": "fa", "verdict": "good",
+         "findings": 3, "reasoning_chars": 10, "ctx_tokens": None,
+         "stress": {"verdict": "thin"}},
+        {"model": "holds", "seat": "b", "family": "fb", "verdict": "good",
+         "findings": 2, "reasoning_chars": 10, "ctx_tokens": None,
+         "stress": {"verdict": "good"}},
+        {"model": "unmeasured", "seat": "c", "family": "fc", "verdict": "good",
+         "findings": 2, "reasoning_chars": 20, "ctx_tokens": None},
+    ]
+    order = [r["model"] for r in rank(rows)]
+    assert order.index("holds") < order.index("wilts"), order
+    assert order.index("unmeasured") < order.index("wilts"), (
+        "absent stress data is neutral, not a demotion — same rule as unknown ctx")
