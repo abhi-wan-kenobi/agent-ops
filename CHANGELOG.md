@@ -1,5 +1,90 @@
 # Changelog
 
+## v0.3.0 — 2026-09-08
+
+Theme: **a machine can now consume a review.** v0.1 proved a stranger could install it,
+v0.2 removed the frictions of using it by hand. v0.3 is what a script needs — and two
+fixes for silent-absence bugs found while building it, both of the exact class the
+playbook's first rule is about.
+
+### Added
+
+- **`--summary-json PATH`** and a `summary.json` written beside every run's reports: one
+  machine-readable document per run, carrying the outcome, exit code, per-seat status,
+  findings counts, severities, report paths and (for `--split-by-file`) the per-file
+  verdict ids. It is written at **every** exit path, including the ones that produce no
+  report directory at all — no diff, refused secret, unresolvable ref, no routable seat,
+  lease denied, cancelled. That is the point of it: those runs must never be mistaken for
+  "reviewed everything, found nothing". `outcome` is a closed vocabulary and `schema` is
+  versioned, so a consumer can pin both.
+- **Severity extraction.** `max_severity` per seat and per run, and per-finding severities,
+  parsed with the same markdown-tolerant pattern the panel already used for counting.
+  Findings are numbered in report order, matching what `verdict <run-id> <family> <n>`
+  expects, so a judgement lands on the finding a human actually read. `null` means no
+  finding carried a recognisable level — unknown, never clean.
+- **`AGENT_OPS_HOME`** moves config, reports and state together. Explicit `[agent_ops]`
+  keys still win; only the defaults move.
+- **`--coder` accepts a comma-separated list** and excludes every named family. A branch
+  carrying commits from more than one model is the normal case, and excluding only the
+  first is worse than excluding nothing: it looks mechanical and is not.
+- **`--version`**, so a wrapper can log and pin the core it runs against.
+- **Continuous integration**: pytest on Python 3.11, 3.12 and 3.13, actions pinned by
+  commit SHA, plus a gate that refuses to ship machine-specific strings and a release
+  guard that requires a version tag to match the package.
+- **README**: an exit-code table, a worked CI example with a one-line severity gate, and
+  the command to run the tests.
+
+### Fixed
+
+- **An unreadable new file no longer vanishes from the payload.** The new-file dedup keyed
+  on `is_file()`, then read the text and silently continued past `OSError`. For a file that
+  exists but cannot be read, that dropped the hunks *and* produced no full-text section:
+  the file appeared nowhere, and the panel reported cleanly on a change it had never seen.
+  Measured: the entire payload collapsed to a single header line. Existence is not
+  readability, so the dedup now keys on the read result, and an unreadable file gets a loud
+  marker instead of a silent gap.
+- **A git ref that cannot be resolved is an error, not an empty review.** `run_git`
+  returned `""` on any non-zero exit, so an unfetched base ref or a shallow clone with no
+  merge base produced "produced no diff — nothing to review" and exit 1, which is
+  indistinguishable from a scope that genuinely had no changes. Routine in CI. It now
+  exits 2 carrying git's own message.
+- **One source of truth for the version.** Three files carried it independently and all
+  three disagreed; a test now pins the manifest, the package and the changelog together.
+
+### Fixed — found by running the panel on this release
+
+The OpenRouter path had never been exercised against the real API before this release.
+It has now: all three starter seats scored `good` on both probe stages, and a panel over
+this release's own diff produced these, each reproduced before it was fixed.
+
+- **A `SEVERITY:` line inside a fenced code block started a new finding.** Seats writing a
+  FIX routinely quote the report format itself. Measured: a report whose only real finding
+  was `low`, but whose FIX block quoted a `critical` header, split into two findings and
+  reported `max_severity: critical`. A gate keyed on that blocks a change on the strength
+  of a code sample. Fences are now masked for the boundary search only, so each finding
+  keeps its code blocks.
+- **The severity value pattern did not inherit the markdown tolerance it claimed.**
+  `**SEVERITY:** — High`, a backticked level and `SEVERITY: - High` were all counted as
+  findings while reading as unlabelled, so a seat that labelled everything reported as
+  fully unlabelled.
+- **A clean review could carry a severity.** A seat wrote a "no defects found" note shaped
+  like a finding and then declared zero findings; the note graded the run `low`. The
+  seat's own count is the contract.
+- **Non-UTF-8 bytes in git output crashed the run.** Diff content lines are emitted raw,
+  so one stray byte in a nominally-text file raised `UnicodeDecodeError` from inside
+  `subprocess` — neither an empty diff nor a git error. Now decoded with replacement, as
+  file text already was.
+- **`git` missing from `PATH` escaped the error model**, which minimal CI images make
+  routine.
+- **`--coder ",,"` silently excluded nothing** while looking like exclusion was in force.
+- **The summary could disagree with the exit status**, and an encoding failure could
+  consume the run's only chance at a record.
+
+### Measured
+
+- One three-seat OpenRouter review of a ~9k-char change: **US$0.0047** (2026-09-08). The
+  README and example config previously estimated this; it is now measured.
+
 ## v0.2.2 — 2026-09-02
 
 ### Added

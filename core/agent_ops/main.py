@@ -16,17 +16,18 @@ import signal
 import sys
 import time
 
-from . import run_state
-from .classify import SECRET_RE, classify_seat
+from . import __version__, run_state
+from .classify import SECRET_RE, classify_seat, max_severity, split_findings
 from .config import Config, ConfigError, Seat, load_config
 from .init_cmd import run_init
 from .lease import Lease
 from .panel import family_of, load_probe_seconds, load_seats, pick_panel
-from .payload import SEAT_NOTE_CHARS, build_payload
+from .payload import SEAT_NOTE_CHARS, GitError, build_payload
 from .probe import PROBE_PROMPT_CHARS, run_probe
 from .providers import BaseProvider, make_provider
 from .report import PROMPT_HEAD, append_stats, write_payload, write_seat_report
 from .stats import run_stats, run_verdict
+from .summary import Summary
 
 DEFAULT_TIMEOUT = 900
 # Probe-informed cap: ~6x the seat's measured probe latency, SCALED by how much bigger
@@ -91,11 +92,25 @@ def run_seat(provider: BaseProvider, seat: Seat, prompt: str, outdir: pathlib.Pa
     status, findings, reason = classify_seat(
         out.content, timed_out=(out.error == "timeout"),
         failed=bool(out.error and out.error != "timeout"), reason=out.error or "")
-    write_seat_report(outdir, seat.family, seat.model, status, reason, out.content)
+    report_path = write_seat_report(outdir, seat.family, seat.model, status, reason,
+                                    out.content)
+    # Severity per finding and the worst of them, so a report can be rendered and a CI
+    # gate can act without re-parsing markdown. A seat that did not run gets None, never
+    # a level — same reasoning as findings=None: it is not entitled to the claim.
+    # The seat's own count is the contract. Measured on a live panel (2026-09-08): a seat
+    # wrote "SEVERITY: low / WHAT: No defects found" and then "AUDIT COMPLETE - 0
+    # findings" — a CLEAN review that graded as `low` because the note was shaped like a
+    # finding. A clean review must carry no severity at all, or a gate acts on a severity
+    # nobody claimed.
+    graded = (split_findings(out.content)
+              if status in ("ok", "truncated") and findings else [])
     return {"model": seat.model, "seat": seat.name, "family": seat.family,
             "findings": findings, "status": status, "reason": reason,
             "truncated": status == "truncated", "seconds": out.seconds,
             "chars": len(out.content),
+            "max_severity": max_severity(out.content) if graded else None,
+            "severities": [f["severity"] for f in graded],
+            "report": str(report_path),
             # Reasoning volume per run makes the burn cliff measurable from stats.jsonl
             # (reasoning-per-input-char per seat) instead of only observable at death.
             "reasoning_chars": len(out.reasoning)}
@@ -142,7 +157,8 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
             return {"model": seat.model, "seat": seat.name, "family": seat.family,
                     "findings": None, "status": "error",
                     "reason": f"seat crashed: {type(e).__name__}: {e}",
-                    "truncated": False, "seconds": 0.0, "chars": 0}
+                    "truncated": False, "seconds": 0.0, "chars": 0,
+                    "max_severity": None, "severities": [], "report": None}
 
     ex = cf.ThreadPoolExecutor(max_workers=len(panel))
     futures = {ex.submit(safe_runner, s): s for s in panel}
@@ -153,7 +169,8 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
         for fut in done:
             r = fut.result()
             run_state.update_seat(run_id, r["model"], status=r["status"],
-                                  findings=r["findings"], seconds=r["seconds"])
+                                  findings=r["findings"], seconds=r["seconds"],
+                                  max_severity=r.get("max_severity"))
             results.append(r)
         if pending and run_state.cancel_requested(run_id):
             for fut in pending:
@@ -173,7 +190,7 @@ def _subdir_name(index: int, path: str) -> str:
 def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
                  outdir: pathlib.Path, files: list[str], panel: list[Seat],
                  providers: dict[str, BaseProvider], probed: dict[str, float],
-                 focus: str) -> int:
+                 focus: str, summary: Summary) -> int:
     """--split-by-file: one panel per changed file, sequentially, under the ONE lease the
     caller already holds. Replaces the hand-written shell loop the v0.1 build needed.
 
@@ -252,9 +269,10 @@ def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
     if cancelled:
         note = (run_state.read_run(run_id) or {}).get("note")
         run_state.finish_run(run_id, "cancelled", note=note)
+        summary.split = per_file
         print(f"\n>> CANCELLED after {len(per_file)} of {len(files)} files — later files "
               f"were never reviewed.", file=sys.stderr)
-        return 8
+        return summary.emit("cancelled", 8)
 
     # One summary for the whole run — the point of the flag. Per-file quorum is judged
     # the same way as a single run's: a file where <2 seats reported is a lead-quality
@@ -291,19 +309,29 @@ def _audit_split(a, config: Config, repo: pathlib.Path, run_id: str,
     ok = bool(reviewed) and not skipped and not unreviewed
     run_state.finish_run(run_id, "done" if ok else "failed", exit_code=0 if ok else 1,
                          error=None if ok else "not every file was fully reviewed")
-    return 0 if ok else 1
+    summary.split = per_file
+    # Seat-level totals for a split run are the union across files: a caller gating on
+    # max_severity must see the worst finding anywhere in the change, not in file 1.
+    summary.seats = [r for pf in reviewed for r in pf["results"]]
+    return summary.emit("done" if ok else "failed", 0 if ok else 1)
 
 
-def _make_cancel_signal_handler(run_id: str):
+def _make_cancel_signal_handler(run_id: str, summary: Summary | None = None):
     """A killed run must not leave a permanently "running"/"queued" record.
 
     The handler writes the terminal record itself and re-raises as SystemExit so the
     exception still unwinds through main()'s try/finally, which is what releases the
     lease exactly as a normal exit would.
+
+    It also emits the summary. A CI job cancelled mid-review sends SIGTERM, and a caller
+    that finds no summary file cannot tell "cancelled" from "the tool never started" —
+    which is the same absence-is-ambiguous failure the document exists to remove.
     """
     def handler(signum, frame):                                # noqa: ANN001
         run_state.finish_run(run_id, "cancelled",
                              error=f"terminated by signal {signum}")
+        if summary is not None:
+            summary.emit("cancelled", 130)
         raise SystemExit(130)
     return handler
 
@@ -314,7 +342,9 @@ def audit(argv: list[str]) -> int:
     ap.add_argument("repo")
     ap.add_argument("--scope", default="uncommitted",
                     help="uncommitted (default) | last | commit:<ref> | <git-ref>")
-    ap.add_argument("--coder", help="model that WROTE the code; its family is excluded")
+    ap.add_argument("--coder", help="model that WROTE the code; its family is excluded. "
+                                    "Comma-separate when more than one model contributed "
+                                    "— every named family is excluded")
     ap.add_argument("--models", help="explicit comma-separated panel by seat name or model "
                                      "id (overrides rotation AND coder exclusion)")
     ap.add_argument("--seats", type=int, default=2)
@@ -331,25 +361,43 @@ def audit(argv: list[str]) -> int:
                          "hand-written loop (combines with --only, which narrows first)")
     ap.add_argument("--no-lock", action="store_true")
     ap.add_argument("--config", help="panel.toml path (default ~/.agent-ops/panel.toml)")
+    ap.add_argument("--summary-json", metavar="PATH",
+                    help="write a machine-readable summary of the run here. Written at "
+                         "EVERY exit path, including the ones that produce no report "
+                         "directory (no diff, refused secret, unresolvable ref), so a "
+                         "scripted caller can always tell a dead run from a clean one")
     a = ap.parse_args(argv)
+
+    # Built before the first thing that can fail, so every return below has a document to
+    # emit. `summary` is threaded through rather than global: two panels can share a
+    # process in tests, and a shared accumulator would blend their runs.
+    summary = Summary(repo=str(a.repo), scope=a.scope, coder=a.coder,
+                      path=pathlib.Path(a.summary_json) if a.summary_json else None)
 
     try:
         config = load_config(a.config)
     except ConfigError as e:
         print(f"CONFIG ERROR: {e}", file=sys.stderr)
-        return 2
+        return summary.emit("config-error", 2)
     run_state.RUNS_DIR = config.runs_dir
 
     repo = pathlib.Path(a.repo).expanduser().resolve()
     if not repo.is_dir():
         print(f"ERROR: {repo} is not a directory", file=sys.stderr)
-        return 2
+        return summary.emit("config-error", 2)
+    summary.repo = str(repo)
 
-    payload, files, desc = build_payload(repo, a.scope, a.only, config.max_payload)
+    try:
+        payload, files, desc = build_payload(repo, a.scope, a.only, config.max_payload)
+    except GitError as e:
+        # Never let an unresolvable ref read as a clean, empty review.
+        print(f"ERROR: git could not resolve --scope {a.scope!r} in {repo}: {e}",
+              file=sys.stderr)
+        return summary.emit("git-error", 2)
     if not payload.strip() or not files:
         print(f"NOTE: '{a.scope}' produced no diff in {repo} — nothing to review.",
               file=sys.stderr)
-        return 1
+        return summary.emit("no-diff", 1)
 
     # This is the exact text that leaves the machine, so scan THAT — a gate that scans the
     # diff alone while the payload carries whole files is a documented hole.
@@ -357,7 +405,12 @@ def audit(argv: list[str]) -> int:
         print("REFUSED: the payload contains what looks like a live credential "
               "(JWT / OAuth secret / token / private key).", file=sys.stderr)
         print("         Remove it or narrow --scope, then re-run.", file=sys.stderr)
-        return 3
+        return summary.emit("refused-secret", 3)
+
+    summary.files = list(files)
+    summary.scope_desc = desc
+    summary.payload_chars = len(payload)
+    summary.payload_truncated = "[TRUNCATED at" in payload
 
     if len(payload) > SEAT_NOTE_CHARS:
         print(f"note: payload is {len(payload):,} chars. If the reports come back empty, "
@@ -368,10 +421,26 @@ def audit(argv: list[str]) -> int:
     if not seats:
         print("ERROR: no seats configured — write a panel.toml first "
               "(see panel.example.toml in the plugin).", file=sys.stderr)
-        return 2
+        return summary.emit("no-seats", 2)
     if not a.coder and not a.models:
         print(">> ⚠️ no --coder given. Family rotation only works when the panel knows "
               "which family wrote the code — pass --coder <model>.", file=sys.stderr)
+    elif a.coder and not a.models and not {family_of(c) for c in a.coder.split(",")
+                                           if c.strip()}:
+        # Panel finding 2026-09-08: --coder "," (a broken list join, e.g. "$A,$B" with
+        # both empty) passes the truthiness check, every fragment is stripped away, and
+        # the ban set ends up empty — indistinguishable from passing no --coder at all,
+        # with no error. The operator believes rotation is in force and it is not.
+        #
+        # The same panel proposed extending this to warn whenever the named families are
+        # disjoint from the configured seats, to catch typos like "cluade-sonnet-5". That
+        # fix is wrong and was reverted after being written: disjoint is the NORMAL state
+        # whenever the coder's family is simply not one of your seats, which is both
+        # common and healthy. The warning would fire on correct usage, and a warning that
+        # cries wolf is worse than none. A right finding can carry a wrong fix
+        # (playbook rule 7) — the typo case is real but is not distinguishable here.
+        print(f">> ⚠️ --coder {a.coder!r} names no family at all — NOTHING is excluded. "
+              f"A family may be reviewing its own work.", file=sys.stderr)
     override = a.models.split(",") if a.models else None
     panel = pick_panel(a.coder, a.seats, override, seats)
     if override:
@@ -384,14 +453,14 @@ def audit(argv: list[str]) -> int:
     if not panel:
         print("ERROR: no eligible seats (does the config have at least two families, "
               "excluding the coder's?)", file=sys.stderr)
-        return 2
+        return summary.emit("no-eligible-seats", 2)
 
     try:
         providers = {name: make_provider(config.providers[name])
                      for name in {s.provider for s in panel}}
     except ConfigError as e:
         print(f"CONFIG ERROR: {e}", file=sys.stderr)
-        return 2
+        return summary.emit("config-error", 2)
 
     # Preflight, best effort per provider: a reachable listing that lacks the model turns
     # a slow per-seat failure into one line now. An unreachable listing proves nothing and
@@ -407,7 +476,7 @@ def audit(argv: list[str]) -> int:
     if not panel:
         print("\n>> ⛔ NO ROUTABLE SEAT — this review did not happen. Not clean.",
               file=sys.stderr)
-        return 2
+        return summary.emit("no-routable-seat", 2)
 
     probed = load_probe_seconds(config)
     timeouts = seat_timeouts(panel, probed, a.timeout, len(payload))
@@ -415,10 +484,12 @@ def audit(argv: list[str]) -> int:
     # The run record is created BEFORE the lease is requested, so a run waiting behind
     # another panel is visible as "queued" rather than not existing yet.
     run_id, outdir = claim_run_dir(config.outroot)
+    summary.run_id, summary.outdir = run_id, outdir
+    summary.panel = [s.name for s in panel]
     label = f"agent-ops:{os.getpid()}"
     run_state.new_run(run_id, str(outdir), str(repo), a.scope, a.coder)
 
-    old_handlers = [(sig, signal.signal(sig, _make_cancel_signal_handler(run_id)))
+    old_handlers = [(sig, signal.signal(sig, _make_cancel_signal_handler(run_id, summary)))
                     for sig in (signal.SIGINT, signal.SIGTERM)]
 
     lease = Lease(config.lease_dir, max_slots=config.lease_slots)
@@ -433,12 +504,12 @@ def audit(argv: list[str]) -> int:
                 run_state.finish_run(run_id, "cancelled", note=note)
                 print("CANCELLED: run was cancelled while waiting for the panel lease",
                       file=sys.stderr)
-                return 8
+                return summary.emit("cancelled", 8)
             if not held:
                 run_state.finish_run(run_id, "failed",
                                      error="could not acquire the panel lease")
                 print("ERROR: another review holds the lease", file=sys.stderr)
-                return 7
+                return summary.emit("lease-denied", 7)
 
         run_state.update_run(run_id, state="running", started_at=time.time(),
                              lease={"held": held, "waiting_since": None,
@@ -475,7 +546,7 @@ def audit(argv: list[str]) -> int:
             print(f">> split    : one panel per file ({len(files)} files, sequential; "
                   f"timeouts computed per file)", file=sys.stderr)
             return _audit_split(a, config, repo, run_id, outdir, files, panel,
-                                providers, probed, focus)
+                                providers, probed, focus, summary)
 
         write_payload(outdir, payload)
         results, cancelled = run_panel_cooperatively(
@@ -485,9 +556,10 @@ def audit(argv: list[str]) -> int:
         if cancelled:
             note = (run_state.read_run(run_id) or {}).get("note")
             run_state.finish_run(run_id, "cancelled", note=note)
+            summary.seats = results
             print("\n>> CANCELLED: run was cancelled while seats were in flight — "
                   "abandoned whatever had not yet reported.", file=sys.stderr)
-            return 8
+            return summary.emit("cancelled", 8)
 
         for r in results:
             if r["findings"] is None:
@@ -526,7 +598,8 @@ def audit(argv: list[str]) -> int:
         rc = 0 if reported else 1
         run_state.finish_run(run_id, "done" if rc == 0 else "failed", exit_code=rc,
                              error=None if rc == 0 else "no seat produced a report")
-        return rc
+        summary.seats = results
+        return summary.emit("done" if rc == 0 else "failed", rc)
     finally:
         for sig, old in old_handlers:
             signal.signal(sig, old)
@@ -555,6 +628,9 @@ def _pop_config(argv: list[str]) -> tuple[str | None, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else ""
+    if cmd in ("--version", "-V", "version"):
+        print(f"agent-ops {__version__}")
+        return 0
     if cmd == "init":
         return run_init(argv[1:])
     if cmd in ("verdict", "stats"):

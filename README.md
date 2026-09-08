@@ -61,9 +61,9 @@ PYTHONPATH=<plugin>/core python3 -m agent_ops init       # or: init --ollama for
 export OPENROUTER_API_KEY=sk-or-...                      # init prints this line too
 ```
 
-The starter panel is three cheap, diverse OpenRouter families; a typical review costs
-well under US$0.05, usually under a cent. Local Ollama seats are free. `init` never
-overwrites an existing panel.toml.
+The starter panel is three cheap, diverse OpenRouter families. **Measured 2026-09-08**
+against the live API: one three-seat review of a ~9k-char change cost **US$0.0047**.
+Local Ollama seats are free. `init` never overwrites an existing panel.toml.
 
 ## Use
 
@@ -72,6 +72,7 @@ or run the panel directly from any checkout:
 
 ```bash
 PYTHONPATH=<plugin>/core python3 -m agent_ops <repo> --coder <model-that-wrote-it>
+                                                           # comma-separate several coders
 PYTHONPATH=<plugin>/core python3 -m agent_ops <repo> --coder <model> --split-by-file
                                                            # one panel per changed file, one summary
 PYTHONPATH=<plugin>/core python3 -m agent_ops probe        # score & rank your seats
@@ -90,6 +91,59 @@ PYTHONPATH=<plugin>/core python3 -m agent_ops verdict <run-id> <family> <n> conf
 PYTHONPATH=<plugin>/core python3 -m agent_ops stats        # per-seat / per-coder false-positive rates
 ```
 
+## In CI, or any script
+
+Every run writes a machine-readable summary next to its reports, and `--summary-json`
+puts a copy wherever you want it:
+
+```bash
+PYTHONPATH=<plugin>/core python3 -m agent_ops <repo> --coder <model> \
+  --scope "$BASE_SHA...$HEAD_SHA" --summary-json summary.json
+```
+
+`--scope base...head` reviews the branch against its merge base, which is what a pull
+request means. It needs full history, so a shallow clone must be deepened first.
+
+The summary is written on **every** exit path, including the ones that produce no report
+directory at all. That is the point: a run that could not resolve the ref, refused on a
+secret, or found no routable seat must not be mistaken for one that reviewed everything
+and found nothing.
+
+```json
+{ "schema": 1, "outcome": "done", "exit_code": 0, "reported_seats": 2,
+  "max_severity": "high", "seats": [ { "family": "glm", "status": "ok",
+  "findings": 3, "max_severity": "high", "report": "…/glm.md" } ] }
+```
+
+Gate on it in one line. Note the two conditions: a dead panel is not a pass.
+
+```bash
+python3 -c 'import json,sys; d=json.load(open("summary.json")); \
+  sys.exit(0 if d["outcome"]=="done" and d["max_severity"] not in ("high","critical") else 1)'
+```
+
+`max_severity` is `null` when no finding carried a recognisable level. That means
+*unknown*, never *safe*.
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | A panel convened and at least one seat reported |
+| 1 | Nothing was reviewed: no diff, or no seat reported, or a split run left files unreviewed |
+| 2 | Config, repo path, provider, or an unresolvable git ref |
+| 3 | Refused: the outbound payload looked like it carried a live credential |
+| 7 | Another panel holds the lease |
+| 8 | Cancelled |
+| 130 | Killed by a signal |
+
+Set `AGENT_OPS_HOME` to move config, reports and state together, which is usually what a
+CI job wants:
+
+```bash
+export AGENT_OPS_HOME="$RUNNER_TEMP/agent-ops"
+```
+
 ## Hook configuration (optional — sane defaults apply with none)
 
 `~/.agent-ops/hooks.toml`, overlaid per-project by `<project>/.agent-ops/hooks.toml`:
@@ -102,6 +156,12 @@ readonly_roots = ["~/notes/vault"]          # no agent edits under these, ever
 [dangerous_git]
 # always_block defaults cover push --force, reset --hard, clean -f, branch -D, ...
 shared_worktrees = ["~/work/shared"]        # extra blocks (rebase, amend, add -A) inside
+```
+
+## Development
+
+```bash
+python3 -m pytest tests/          # the whole suite; no dependencies beyond pytest itself
 ```
 
 ## Licence

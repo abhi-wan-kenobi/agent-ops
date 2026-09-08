@@ -19,10 +19,11 @@ import time
 import urllib.error
 import urllib.request
 
+from . import __version__
 from .classify import SECRET_RE
 from .config import ConfigError, ProviderConfig
 
-USER_AGENT = "agent-ops/0.1"
+USER_AGENT = f"agent-ops/{__version__}"
 
 # Transient failures are retried with exponential backoff; a hard client error is not.
 # 429 gets a single retry: one backoff is polite, hammering a rate limit is not.

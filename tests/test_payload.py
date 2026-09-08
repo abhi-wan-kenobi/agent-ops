@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import tempfile
 
-from agent_ops.payload import build_payload, run_git, split_diff_blocks
+import pytest
+
+from agent_ops.payload import GitError, build_payload, run_git, split_diff_blocks
 
 
 def _repo(tmp: pathlib.Path, committed: dict[str, str], then: dict[str, str]) -> pathlib.Path:
@@ -27,6 +28,12 @@ def _repo(tmp: pathlib.Path, committed: dict[str, str], then: dict[str, str]) ->
         (tmp / name).write_text(body, encoding="utf-8")
     run("add", "-A")
     return tmp
+
+
+def _default_branch(repo: pathlib.Path) -> str:
+    """git init's default branch name varies by version and user config."""
+    return subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                          check=True, capture_output=True, text=True).stdout.strip()
 
 
 BODY = "".join(f"line {i} of a file that is long enough to measure\n" for i in range(120))
@@ -97,6 +104,38 @@ def test_unreadable_new_file_keeps_its_hunks(tmp_path):
         "now invisible in the payload")
 
 
+def test_unreadable_on_disk_new_file_keeps_its_hunks_and_says_so(tmp_path, monkeypatch):
+    """A new file that EXISTS but cannot be read used to lose both halves.
+
+    The dedup keyed on is_file(), so the hunks were dropped in exchange for a FULL FILE
+    section that the subsequent read then failed to produce. Net effect: a brand-new file
+    appeared nowhere in the payload, and the review reported cleanly on a change it had
+    never seen. Existence is not readability.
+
+    chmod 000 is not usable here — CI containers routinely run as root, where it does not
+    deny anything — so the read failure is injected directly.
+    """
+    repo = _repo(tmp_path, {"keep.txt": "x\n"}, {"locked.py": BODY})
+    real_read_text = pathlib.Path.read_text
+
+    def deny_one(self, *a, **kw):
+        if self.name == "locked.py":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", deny_one)
+    payload, files, _ = build_payload(repo, "uncommitted")
+
+    assert files == ["locked.py"], files
+    assert "+line 0 of a file" in payload, (
+        "hunks were dropped for a new file whose full text could not be read — the change "
+        "is now invisible in the payload")
+    assert "UNREADABLE (PermissionError)" in payload, (
+        "the missing FULL FILE section must explain itself, not just be absent")
+    assert "===== FULL FILE: locked.py =====" not in payload, (
+        "no full-text section should claim to carry a file that was never read")
+
+
 def test_deletion_only_diff_is_reviewed_not_empty(tmp_path):
     """Regression: a deleted file's header is '+++ /dev/null', so its path used to stay
     None, the files list came back empty, and main() declared 'nothing to review' for a
@@ -164,3 +203,83 @@ def test_truncation_is_loud(tmp_path):
     payload, _, _ = build_payload(repo, "uncommitted", max_payload=500)
     assert "TRUNCATED at 500 chars" in payload
     assert "did NOT see the whole change" in payload
+
+
+def test_run_git_raises_on_an_unknown_ref(tmp_path):
+    """A ref git cannot resolve must be an error, not an empty string that reads as
+    'no changes'. This is the CI failure mode: an unfetched base ref or a shallow clone
+    with no merge base used to surface as a clean, finding-free review."""
+    repo = _repo(tmp_path, {"a.py": "a\n"}, {})
+    with pytest.raises(GitError) as e:
+        run_git(["diff", "no-such-ref-anywhere"], repo)
+    assert "no-such-ref-anywhere" in str(e.value), str(e.value)
+
+
+def test_unknown_scope_ref_reaches_the_caller_as_an_error(tmp_path):
+    repo = _repo(tmp_path, {"a.py": "a\n"}, {})
+    with pytest.raises(GitError):
+        build_payload(repo, "origin/does-not-exist...HEAD")
+
+
+def test_three_dot_range_scope_reviews_only_the_branch_changes(tmp_path):
+    """The scope a PR review uses. It already works via the git-diff fallthrough, but
+    nothing pinned it, so nothing stopped a future refactor from breaking CI silently."""
+    repo = _repo(tmp_path, {"base.py": "base\n"}, {})
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True,
+                                    capture_output=True, text=True)
+    base_branch = _default_branch(repo)
+    run("checkout", "-qb", "feature")
+    (repo / "feature.py").write_text("FEATURE_LINE = 1\n", encoding="utf-8")
+    run("add", "-A"); run("commit", "-qm", "feature work")
+    # Meanwhile the base branch moves on. A two-dot diff would drag this in; three-dot,
+    # which diffs against the merge base, must not.
+    run("checkout", "-q", base_branch)
+    (repo / "unrelated.py").write_text("UNRELATED_LINE = 1\n", encoding="utf-8")
+    run("add", "-A"); run("commit", "-qm", "unrelated base work")
+    base = run("rev-parse", "HEAD").stdout.strip()
+
+    payload, files, desc = build_payload(repo, f"{base}...feature")
+    assert files == ["feature.py"], files
+    assert "FEATURE_LINE" in payload
+    assert "UNRELATED_LINE" not in payload, (
+        "a three-dot range must diff against the merge base, not the branch tip")
+
+
+def test_non_utf8_bytes_in_git_output_do_not_crash(tmp_path):
+    """Confirmed panel finding (glm, 2026-09-08), reproduced as a real crash.
+
+    Diff CONTENT lines are emitted raw by git, so one stray byte in a nominally-text file
+    made subprocess's strict default decoder raise UnicodeDecodeError from inside
+    run_git — neither an empty diff nor a GitError, just an unhandled crash in the routine
+    path. The module already reads file text with errors='replace'.
+    """
+    repo = _repo(tmp_path, {"a.txt": "hello\n"}, {})
+    (repo / "a.txt").write_bytes(b"hello\n\xff\xfe not valid utf-8 \xff\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    diff = run_git(["diff", "HEAD"], repo)       # must not raise
+    assert "a.txt" in diff
+    payload, files, _ = build_payload(repo, "uncommitted")
+    assert files == ["a.txt"]
+    assert payload.strip()
+
+
+def test_git_missing_from_path_is_a_git_error(tmp_path, monkeypatch):
+    """Confirmed panel finding (glm, 2026-09-08). Minimal CI images without git are the
+    norm, and FileNotFoundError escaped the error model entirely."""
+    repo = _repo(tmp_path, {"a.txt": "x\n"}, {})
+
+    def no_git(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    with pytest.raises(GitError) as e:
+        run_git(["diff", "HEAD"], repo)
+    assert "PATH" in str(e.value), str(e.value)
+
+
+def test_run_git_has_no_failure_swallowing_escape_hatch():
+    """Confirmed panel finding (glm, 2026-09-08): a check=False parameter reintroduced the
+    exact 'empty string means both no-changes and could-not-resolve' conflation this
+    function exists to prevent. Unused, and a trap for the next caller."""
+    import inspect
+    assert "check" not in inspect.signature(run_git).parameters

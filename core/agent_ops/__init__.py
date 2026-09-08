@@ -5,4 +5,6 @@ records, and a panel runner. No vendor, host, or gateway assumptions live here; 
 that is in the user's panel.toml.
 """
 
-__version__ = "0.1.0"
+# Single source of truth for the version. .claude-plugin/plugin.json and the
+# CHANGELOG heading must agree; tests/test_version.py enforces that.
+__version__ = "0.3.0"

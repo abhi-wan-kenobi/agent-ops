@@ -67,7 +67,10 @@ def test_missing_explicit_config_is_an_error(tmp_path):
 
 
 def test_missing_default_config_yields_seatless_defaults(tmp_path, monkeypatch):
-    monkeypatch.setattr(cfg_mod, "DEFAULT_CONFIG_PATH", str(tmp_path / "absent.toml"))
+    # AGENT_OPS_HOME, not a monkeypatched constant: patching DEFAULT_CONFIG_PATH stopped
+    # isolating this test the moment the default became a function, and it silently fell
+    # through to the developer's REAL ~/.agent-ops/panel.toml.
+    monkeypatch.setenv("AGENT_OPS_HOME", str(tmp_path / "home"))
     c = load_config()
     assert c.seats == [] and c.providers == {}
     assert c.max_payload == cfg_mod.DEFAULT_MAX_PAYLOAD
@@ -174,3 +177,24 @@ def test_content_type_header_in_config_is_refused(tmp_path):
 def test_non_string_header_value_is_refused(tmp_path):
     with pytest.raises(ConfigError, match="must be a string"):
         load_config(_headers_toml(tmp_path, '[providers.p.headers]\n"X-N" = 5'))
+
+
+def test_agent_ops_home_rebases_every_default_path(tmp_path, monkeypatch):
+    """One environment variable moves config, reports and state together. A CI job needs
+    all three in a scratch directory, and passing three flags to get there is a way to
+    get two of them right."""
+    monkeypatch.setenv("AGENT_OPS_HOME", str(tmp_path / "scratch"))
+    c = load_config()
+    assert c.outroot == tmp_path / "scratch" / "audits", c.outroot
+    assert c.state_dir == tmp_path / "scratch" / "state", c.state_dir
+    assert cfg_mod.default_config_path() == tmp_path / "scratch" / "panel.toml"
+
+
+def test_explicit_config_keys_still_beat_agent_ops_home(tmp_path, monkeypatch):
+    """The env var moves DEFAULTS only. A user who wrote outroot into panel.toml meant it."""
+    monkeypatch.setenv("AGENT_OPS_HOME", str(tmp_path / "scratch"))
+    cfg = tmp_path / "panel.toml"
+    cfg.write_text(f'[agent_ops]\noutroot = "{tmp_path / "explicit"}"\n', encoding="utf-8")
+    c = load_config(str(cfg))
+    assert c.outroot == tmp_path / "explicit", c.outroot
+    assert c.state_dir == tmp_path / "scratch" / "state", "state_dir had no override"

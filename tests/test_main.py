@@ -561,3 +561,75 @@ def test_stats_lines_record_reasoning_chars_per_seat(env, fake_provider):
     assert by_model["model-a"]["reasoning_chars"] == 1234
     assert by_model["model-b"]["reasoning_chars"] == 9999
     assert by_model["model-b"]["findings"] is None, "burned seat stays a dead seat"
+
+
+def test_unknown_scope_ref_is_an_error_not_an_empty_review(env, capsys):
+    """Playbook rule 1, at the CLI boundary.
+
+    An unfetched base ref or a shallow clone with no merge base is routine in CI. It used
+    to produce an empty diff and the message 'produced no diff — nothing to review', which
+    is indistinguishable from a scope that genuinely had no changes. It must be an error.
+    """
+    repo, cfg, _ = env
+    rc = main(_argv(repo, cfg, "--scope", "origin/nonexistent...HEAD"))
+    err = capsys.readouterr().err
+    assert rc == 2, f"a ref git cannot resolve must exit 2, got {rc}"
+    assert "could not resolve" in err, err
+    assert "nothing to review" not in err, (
+        "an unresolvable ref must never be reported as an empty review")
+
+
+def test_stats_line_carries_max_severity_and_report_path_per_seat(env, tmp_path):
+    """Severity has to survive the whole way to stats.jsonl, or a renderer and a CI gate
+    have to re-parse every seat's markdown to learn what the run already knew."""
+    repo, cfg, root = env
+    FakeProvider.outputs = {
+        "model-a": SeatOutput(content=(
+            "SEVERITY: low\nFILE: a.py:1\nWHAT: minor\n\n"
+            "SEVERITY: critical\nFILE: a.py:2\nWHAT: bad\n\n"
+            "AUDIT COMPLETE - 2 findings\n")),
+        "model-b": SeatOutput(error="boom"),
+    }
+    assert main(_argv(repo, cfg)) == 0
+    line = json.loads((root / "state" / "stats.jsonl").read_text().strip().splitlines()[-1])
+    seats = {s["seat"]: s for s in line["seats"]}
+
+    assert seats["seat-a"]["max_severity"] == "critical"
+    assert seats["seat-a"]["severities"] == ["low", "critical"]
+    assert seats["seat-a"]["report"].endswith("fam-a.md")
+
+    # A seat that never ran gets no severity, for the same reason it gets findings=None:
+    # it is not entitled to a claim about code it never read.
+    assert seats["seat-b"]["max_severity"] is None
+    assert seats["seat-b"]["findings"] is None
+    assert seats["seat-b"]["severities"] == []
+
+
+def test_a_coder_naming_no_family_says_nothing_was_excluded(env, capsys):
+    """Confirmed panel finding (glm, 2026-09-08). `--coder ",,"` — a shell expansion with
+    empty variables is the realistic source — passes the truthiness check and yields an
+    empty ban set, indistinguishable from passing no --coder at all."""
+    repo, cfg, _ = env
+    main([str(repo), "--config", str(cfg), "--coder", ",,"])
+    err = capsys.readouterr().err
+    assert "names no family at all" in err, err
+    assert "NOTHING is excluded" in err, err
+
+
+def test_an_unmatched_coder_family_is_not_warned_about(env, capsys):
+    """The same panel proposed warning whenever the named family matches no seat, to catch
+    typos. That fix is wrong: a coder family that is not among your seats is the NORMAL,
+    healthy case (you review Claude's work with a deepseek/qwen/glm panel). The warning
+    would fire on correct usage, and one that cries wolf is worse than none."""
+    repo, cfg, _ = env
+    main([str(repo), "--config", str(cfg), "--coder", "claude-opus-4"])
+    err = capsys.readouterr().err
+    assert "NOTHING is excluded" not in err, (
+        "warned about a coder family that is simply not in the panel — normal usage")
+
+
+def test_a_real_coder_does_not_trigger_the_warning(env, capsys):
+    repo, cfg, _ = env
+    main(_argv(repo, cfg))
+    assert "names no usable family" not in capsys.readouterr().err
+

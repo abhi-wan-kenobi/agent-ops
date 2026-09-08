@@ -19,9 +19,45 @@ DEFAULT_MAX_PAYLOAD = 400_000     # chars of diff+files; beyond this we truncate
 SEAT_NOTE_CHARS = 20_000
 
 
+class GitError(RuntimeError):
+    """git refused the request. Distinct from 'git ran and the diff was empty'."""
+
+
 def run_git(args: list[str], cwd: pathlib.Path) -> str:
-    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return p.stdout if p.returncode == 0 else ""
+    """Run git and return stdout. Every failure raises GitError; nothing returns "".
+
+    Returning "" on failure conflated two states that must never be confused: a scope with
+    no changes, and a scope git could not resolve at all. The second is routine in CI (an
+    unfetched base ref, a shallow clone with no merge base) and it used to surface as
+    "produced no diff — nothing to review", which is playbook rule 1 exactly: a run that
+    reviewed nothing looking identical to a run that found nothing.
+
+    There is deliberately NO opt-out flag. A `check=False` escape hatch was written and
+    then removed on a panel finding: it reintroduced the exact conflation this function
+    exists to prevent, and an unused parameter with that semantic is a trap for the next
+    caller who wants "don't fail on a missing ref".
+
+    Three failure modes, one exception type:
+      * non-zero exit — the message is git's own stderr;
+      * git absent from PATH (routine on minimal CI images);
+      * output that is not valid UTF-8. Diff CONTENT lines are emitted raw, so one stray
+        byte in a nominally-text file made the strict default decoder raise
+        UnicodeDecodeError from inside subprocess — neither an empty diff nor a GitError,
+        just a crash. Decoded with errors="replace", matching how this module already
+        reads file text.
+    """
+    try:
+        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                           text=True, errors="replace")
+    except FileNotFoundError as e:
+        raise GitError("git is not installed or not on PATH") from e
+    except OSError as e:
+        raise GitError(f"could not run git: {e}") from e
+    if p.returncode != 0:
+        detail = (p.stderr or p.stdout).strip().splitlines()
+        raise GitError(detail[0] if detail else
+                       f"git {' '.join(args)} exited {p.returncode}")
+    return p.stdout
 
 
 def split_diff_blocks(diff: str) -> list[tuple[str | None, str]]:
@@ -60,6 +96,10 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
                   exact: bool = False) -> tuple[str, list[str], str]:
     """Return (payload, files, description). Payload = diff + full text of changed files.
 
+    Raises GitError when the scope cannot be resolved (see run_git). Callers must handle
+    it: an unresolvable ref is a failed review, and swallowing it here would put back the
+    "nothing to review" ambiguity the exception exists to remove.
+
     `only` narrows to files whose path contains that substring — essential, not optional,
     for multi-file changes: splitting is the difference between a real review and one that
     silently overruns a seat. `exact` makes it a whole-path match instead: --split-by-file
@@ -69,8 +109,9 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
     A brand-new file is the one case `only` cannot help, because a new file's diff IS its
     full text with every line prefixed '+', so inlining both doubles the payload for zero
     extra information. The hunks of pure additions are dropped and only the FULL FILE copy
-    kept — restricted to files readable on disk, since for an unreadable new file the hunks
-    are the change's only record and dropping both would hide it entirely.
+    kept — restricted to files whose text was ACTUALLY READ, since for an unreadable new
+    file the hunks are the change's only record and dropping both would hide it entirely.
+    Existence is not readability: the dedup keys on the read result, never on is_file().
     """
     if scope == "uncommitted":
         diff, desc = run_git(["diff", "HEAD"], repo), "uncommitted changes"
@@ -91,9 +132,24 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
         # list rather than dragging the whole change along and defeating the point.
         blocks = [(p, b) for p, b in blocks if p in files]
 
-    on_disk = {f for f in files if (repo / f).is_file()}
+    # Read BEFORE deciding the dedup. A file can exist and still be unreadable (permissions,
+    # a dangling symlink target, an I/O error), and keying the dedup on is_file() dropped
+    # such a new file's hunks in exchange for a FULL FILE section that then failed to
+    # materialise — the change vanished from the payload entirely, silently. Dogfood
+    # finding (ROADMAP v0.3 payload edge case).
+    texts: dict[str, str] = {}
+    unreadable: dict[str, str] = {}
+    for f in files:
+        p = repo / f
+        if not p.is_file():
+            continue
+        try:
+            texts[f] = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            unreadable[f] = type(e).__name__
+
     added = {p for p, b in blocks
-             if p in on_disk and re.search(r"^new file mode ", b, re.M)}
+             if p in texts and re.search(r"^new file mode ", b, re.M)}
     blocks = [(p, b) for p, b in blocks if p not in added]
     diff = "\n".join(b for _, b in blocks)
     if added:
@@ -107,14 +163,15 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
         parts = [f"===== DIFF ({desc}) =====\n[No modification hunks: every file in this "
                  f"scope is newly added, so its complete text below IS the change.]"]
     for f in files:
-        p = repo / f
-        if not p.is_file():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        parts.append(f"\n===== FULL FILE: {f} =====\n{text}")
+        if f in texts:
+            parts.append(f"\n===== FULL FILE: {f} =====\n{texts[f]}")
+        elif f in unreadable:
+            # Say it out loud. A missing section that nothing explains reads as "this file
+            # had nothing worth showing", which is the opposite of the truth.
+            parts.append(f"\n===== FULL FILE: {f} — UNREADABLE ({unreadable[f]}) =====\n"
+                         f"[This file is on disk but could not be read, so its full text "
+                         f"is absent from this review. Any hunks above are the only record "
+                         f"of the change.]")
     payload = "\n".join(parts)
     if len(payload) > max_payload:
         payload = payload[:max_payload]

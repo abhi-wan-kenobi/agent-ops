@@ -18,12 +18,18 @@ PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops <repo> \
   --coder <model that wrote the code> \
   [--scope uncommitted|last|commit:<ref>|<git-ref>] \
   [--only <path-substring>] [--split-by-file] [--seats N] [--focus "..."] \
-  [--config <panel.toml>]
+  [--config <panel.toml>] [--summary-json <path>]
 ```
 
 **Always pass `--coder`** (e.g. `--coder opus` when you wrote the code). It is what makes
 family rotation mechanical rather than advisory: the coder's family is excluded from the
-panel, so nothing ever reviews its own family's work.
+panel, so nothing ever reviews its own family's work. Comma-separate it when more than
+one model contributed; every named family is excluded.
+
+`--summary-json <path>` writes a machine-readable record of the run — outcome, exit code,
+per-seat status and severity, report paths. It is written even when the run produced no
+reports at all, which is exactly when a caller most needs to know. Use it when scripting;
+read the markdown when reviewing by hand.
 
 Setup lives in `~/.agent-ops/panel.toml` — `agent_ops init` writes a starter (or use the
 `/panel-setup` command for the guided path) — plus one API key env var. If the config is

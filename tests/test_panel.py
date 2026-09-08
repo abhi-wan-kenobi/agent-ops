@@ -199,3 +199,27 @@ def test_probe_seconds_zero_is_a_measurement_not_missing(tmp_path):
     _write_roster_with_detail(cfg, [{"seat": "seat-a", "seconds": 0,
                                      "verdict": "good"}])
     assert load_probe_seconds(cfg) == {"seat-a": 0.0}
+
+
+def test_multiple_coder_families_are_all_excluded():
+    """A branch carrying commits from two models must exclude both. Excluding only the
+    first is worse than excluding nothing: it looks mechanical and is not."""
+    seats = [Seat("a", "claude", "p", "m1"), Seat("b", "gpt", "p", "m2"),
+             Seat("c", "qwen", "p", "m3"), Seat("d", "glm", "p", "m4")]
+    picked = pick_panel("claude-opus-4,gpt-5-codex", 4, None, seats)
+    families = {s.family for s in picked}
+    assert "claude" not in families and "gpt" not in families, families
+    assert families == {"qwen", "glm"}, families
+
+
+def test_coder_list_tolerates_spacing_and_trailing_commas():
+    seats = [Seat("a", "claude", "p", "m1"), Seat("b", "gpt", "p", "m2"),
+             Seat("c", "qwen", "p", "m3")]
+    picked = pick_panel(" claude , , gpt, ", 3, None, seats)
+    assert {s.family for s in picked} == {"qwen"}
+
+
+def test_a_single_coder_still_behaves_exactly_as_before():
+    seats = [Seat("a", "claude", "p", "m1"), Seat("b", "gpt", "p", "m2")]
+    picked = pick_panel("claude-opus-4", 2, None, seats)
+    assert {s.family for s in picked} == {"gpt"}
