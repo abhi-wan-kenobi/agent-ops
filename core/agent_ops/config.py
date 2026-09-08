@@ -14,6 +14,34 @@ import os
 import pathlib
 import tomllib
 
+# Everything agent-ops owns lives under one root. AGENT_OPS_HOME moves that root, which
+# is what lets a CI job point config, reports and state at a scratch directory without
+# writing a config file or passing three flags — and lets two runs on one machine stay
+# fully independent. Explicit [agent_ops] keys still win over it; this only moves the
+# DEFAULTS.
+HOME_ENV = "AGENT_OPS_HOME"
+DEFAULT_HOME = "~/.agent-ops"
+
+
+def home() -> pathlib.Path:
+    return pathlib.Path(os.environ.get(HOME_ENV) or DEFAULT_HOME).expanduser()
+
+
+def default_config_path() -> pathlib.Path:
+    return home() / "panel.toml"
+
+
+def default_outroot() -> pathlib.Path:
+    return home() / "audits"
+
+
+def default_state_dir() -> pathlib.Path:
+    return home() / "state"
+
+
+# Retained as the documented literals. Prefer the functions above: these do not follow
+# AGENT_OPS_HOME, because a module-level constant is resolved at import time and the
+# environment can change between import and call (it does, in tests).
 DEFAULT_CONFIG_PATH = "~/.agent-ops/panel.toml"
 DEFAULT_OUTROOT = "~/.agent-ops/audits"
 DEFAULT_STATE_DIR = "~/.agent-ops/state"
@@ -103,13 +131,14 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
     runs, not surface later as a seat that silently reports nothing.
     """
     explicit = path is not None
-    cfg_path = _expand(str(path or DEFAULT_CONFIG_PATH))
+    cfg_path = _expand(str(path)) if path else _expand(str(default_config_path()))
     if not cfg_path.is_file():
         if explicit:
             raise ConfigError(f"config file not found: {cfg_path}")
         # No config at all: defaults with zero seats. `probe`/`audit` will refuse loudly;
         # `runs` still works. This keeps `--help`-style exploration from demanding a file.
-        return Config(outroot=_expand(DEFAULT_OUTROOT), state_dir=_expand(DEFAULT_STATE_DIR),
+        return Config(outroot=_expand(str(default_outroot())),
+                      state_dir=_expand(str(default_state_dir())),
                       max_payload=DEFAULT_MAX_PAYLOAD, max_tokens=DEFAULT_MAX_TOKENS,
                       lease_slots=DEFAULT_LEASE_SLOTS, seats=[], providers={}, path=None)
 
@@ -188,8 +217,8 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
         seats.append(seat)
 
     return Config(
-        outroot=_expand(str(ops.get("outroot", DEFAULT_OUTROOT))),
-        state_dir=_expand(str(ops.get("state_dir", DEFAULT_STATE_DIR))),
+        outroot=_expand(str(ops.get("outroot", default_outroot()))),
+        state_dir=_expand(str(ops.get("state_dir", default_state_dir()))),
         max_payload=max_payload,
         max_tokens=max_tokens,
         lease_slots=lease_slots,

@@ -336,7 +336,9 @@ def audit(argv: list[str]) -> int:
     ap.add_argument("repo")
     ap.add_argument("--scope", default="uncommitted",
                     help="uncommitted (default) | last | commit:<ref> | <git-ref>")
-    ap.add_argument("--coder", help="model that WROTE the code; its family is excluded")
+    ap.add_argument("--coder", help="model that WROTE the code; its family is excluded. "
+                                    "Comma-separate when more than one model contributed "
+                                    "— every named family is excluded")
     ap.add_argument("--models", help="explicit comma-separated panel by seat name or model "
                                      "id (overrides rotation AND coder exclusion)")
     ap.add_argument("--seats", type=int, default=2)

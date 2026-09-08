@@ -36,6 +36,12 @@ def pick_panel(coder: str | None, n: int, override: list[str] | None,
 
     `override` names seats explicitly (by seat name or model id) and bypasses both the
     rotation and the exclusion — it is the escape hatch, and prints as such.
+
+    `coder` accepts a comma-separated list, and every named family is excluded. A change
+    written by more than one model is the normal case, not an edge one: a branch can carry
+    commits from a human, an agent, and a CI autofixer. Excluding only the first name
+    would leave a family reviewing its own work while the flag suggested otherwise, which
+    is worse than not excluding at all — it is exclusion that looks mechanical and is not.
     """
     if override:
         wanted = [w.strip() for w in override if w.strip()]
@@ -44,7 +50,7 @@ def pick_panel(coder: str | None, n: int, override: list[str] | None,
             by_key.setdefault(s.name, s)
             by_key.setdefault(s.model, s)
         return [by_key[w] for w in wanted if w in by_key]
-    banned = {family_of(coder)} if coder else set()
+    banned = {family_of(c) for c in coder.split(",") if c.strip()} if coder else set()
     out: list[Seat] = []
     seen: set[str] = set()
     for seat in seats:
