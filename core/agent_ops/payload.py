@@ -69,8 +69,9 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
     A brand-new file is the one case `only` cannot help, because a new file's diff IS its
     full text with every line prefixed '+', so inlining both doubles the payload for zero
     extra information. The hunks of pure additions are dropped and only the FULL FILE copy
-    kept — restricted to files readable on disk, since for an unreadable new file the hunks
-    are the change's only record and dropping both would hide it entirely.
+    kept — restricted to files whose text was ACTUALLY READ, since for an unreadable new
+    file the hunks are the change's only record and dropping both would hide it entirely.
+    Existence is not readability: the dedup keys on the read result, never on is_file().
     """
     if scope == "uncommitted":
         diff, desc = run_git(["diff", "HEAD"], repo), "uncommitted changes"
@@ -91,9 +92,24 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
         # list rather than dragging the whole change along and defeating the point.
         blocks = [(p, b) for p, b in blocks if p in files]
 
-    on_disk = {f for f in files if (repo / f).is_file()}
+    # Read BEFORE deciding the dedup. A file can exist and still be unreadable (permissions,
+    # a dangling symlink target, an I/O error), and keying the dedup on is_file() dropped
+    # such a new file's hunks in exchange for a FULL FILE section that then failed to
+    # materialise — the change vanished from the payload entirely, silently. Dogfood
+    # finding (ROADMAP v0.3 payload edge case).
+    texts: dict[str, str] = {}
+    unreadable: dict[str, str] = {}
+    for f in files:
+        p = repo / f
+        if not p.is_file():
+            continue
+        try:
+            texts[f] = p.read_text(encoding="utf-8", errors="replace")
+        except OSError as e:
+            unreadable[f] = type(e).__name__
+
     added = {p for p, b in blocks
-             if p in on_disk and re.search(r"^new file mode ", b, re.M)}
+             if p in texts and re.search(r"^new file mode ", b, re.M)}
     blocks = [(p, b) for p, b in blocks if p not in added]
     diff = "\n".join(b for _, b in blocks)
     if added:
@@ -107,14 +123,15 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
         parts = [f"===== DIFF ({desc}) =====\n[No modification hunks: every file in this "
                  f"scope is newly added, so its complete text below IS the change.]"]
     for f in files:
-        p = repo / f
-        if not p.is_file():
-            continue
-        try:
-            text = p.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        parts.append(f"\n===== FULL FILE: {f} =====\n{text}")
+        if f in texts:
+            parts.append(f"\n===== FULL FILE: {f} =====\n{texts[f]}")
+        elif f in unreadable:
+            # Say it out loud. A missing section that nothing explains reads as "this file
+            # had nothing worth showing", which is the opposite of the truth.
+            parts.append(f"\n===== FULL FILE: {f} — UNREADABLE ({unreadable[f]}) =====\n"
+                         f"[This file is on disk but could not be read, so its full text "
+                         f"is absent from this review. Any hunks above are the only record "
+                         f"of the change.]")
     payload = "\n".join(parts)
     if len(payload) > max_payload:
         payload = payload[:max_payload]

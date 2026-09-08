@@ -97,6 +97,38 @@ def test_unreadable_new_file_keeps_its_hunks(tmp_path):
         "now invisible in the payload")
 
 
+def test_unreadable_on_disk_new_file_keeps_its_hunks_and_says_so(tmp_path, monkeypatch):
+    """A new file that EXISTS but cannot be read used to lose both halves.
+
+    The dedup keyed on is_file(), so the hunks were dropped in exchange for a FULL FILE
+    section that the subsequent read then failed to produce. Net effect: a brand-new file
+    appeared nowhere in the payload, and the review reported cleanly on a change it had
+    never seen. Existence is not readability.
+
+    chmod 000 is not usable here — CI containers routinely run as root, where it does not
+    deny anything — so the read failure is injected directly.
+    """
+    repo = _repo(tmp_path, {"keep.txt": "x\n"}, {"locked.py": BODY})
+    real_read_text = pathlib.Path.read_text
+
+    def deny_one(self, *a, **kw):
+        if self.name == "locked.py":
+            raise PermissionError(13, "Permission denied")
+        return real_read_text(self, *a, **kw)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", deny_one)
+    payload, files, _ = build_payload(repo, "uncommitted")
+
+    assert files == ["locked.py"], files
+    assert "+line 0 of a file" in payload, (
+        "hunks were dropped for a new file whose full text could not be read — the change "
+        "is now invisible in the payload")
+    assert "UNREADABLE (PermissionError)" in payload, (
+        "the missing FULL FILE section must explain itself, not just be absent")
+    assert "===== FULL FILE: locked.py =====" not in payload, (
+        "no full-text section should claim to carry a file that was never read")
+
+
 def test_deletion_only_diff_is_reviewed_not_empty(tmp_path):
     """Regression: a deleted file's header is '+++ /dev/null', so its path used to stay
     None, the files list came back empty, and main() declared 'nothing to review' for a
