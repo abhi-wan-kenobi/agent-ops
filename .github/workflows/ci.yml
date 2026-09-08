@@ -1,0 +1,57 @@
+# Actions are pinned by full commit SHA, with the tag in a trailing comment. A tag is
+# mutable; a SHA is not, and a review panel that cannot vouch for its own supply chain is
+# in a poor position to lecture anyone about theirs.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor: the config loader uses stdlib tomllib.
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+      # pytest and nothing else. "stdlib only, nothing for a user to install" is a product
+      # claim, and a requirements file here would be the first step to quietly breaking it.
+      - run: python -m pip install --disable-pip-version-check pytest
+      - run: python -m pytest tests/ -q
+        env:
+          # Never let a test fall through to a real ~/.agent-ops on a self-hosted runner.
+          AGENT_OPS_HOME: ${{ runner.temp }}/agent-ops-ci
+
+  release-guard:
+    # A tag whose version does not match the package is a release nobody can pin.
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: tag must match the package version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          pkg="v$(PYTHONPATH=core python -c 'import agent_ops; print(agent_ops.__version__)')"
+          echo "tag=$tag package=$pkg"
+          test "$tag" = "$pkg"
