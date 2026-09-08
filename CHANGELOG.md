@@ -1,5 +1,56 @@
 # Changelog
 
+## v0.3.0 — 2026-09-08
+
+Theme: **a machine can now consume a review.** v0.1 proved a stranger could install it,
+v0.2 removed the frictions of using it by hand. v0.3 is what a script needs — and two
+fixes for silent-absence bugs found while building it, both of the exact class the
+playbook's first rule is about.
+
+### Added
+
+- **`--summary-json PATH`** and a `summary.json` written beside every run's reports: one
+  machine-readable document per run, carrying the outcome, exit code, per-seat status,
+  findings counts, severities, report paths and (for `--split-by-file`) the per-file
+  verdict ids. It is written at **every** exit path, including the ones that produce no
+  report directory at all — no diff, refused secret, unresolvable ref, no routable seat,
+  lease denied, cancelled. That is the point of it: those runs must never be mistaken for
+  "reviewed everything, found nothing". `outcome` is a closed vocabulary and `schema` is
+  versioned, so a consumer can pin both.
+- **Severity extraction.** `max_severity` per seat and per run, and per-finding severities,
+  parsed with the same markdown-tolerant pattern the panel already used for counting.
+  Findings are numbered in report order, matching what `verdict <run-id> <family> <n>`
+  expects, so a judgement lands on the finding a human actually read. `null` means no
+  finding carried a recognisable level — unknown, never clean.
+- **`AGENT_OPS_HOME`** moves config, reports and state together. Explicit `[agent_ops]`
+  keys still win; only the defaults move.
+- **`--coder` accepts a comma-separated list** and excludes every named family. A branch
+  carrying commits from more than one model is the normal case, and excluding only the
+  first is worse than excluding nothing: it looks mechanical and is not.
+- **`--version`**, so a wrapper can log and pin the core it runs against.
+- **Continuous integration**: pytest on Python 3.11, 3.12 and 3.13, actions pinned by
+  commit SHA, plus a gate that refuses to ship machine-specific strings and a release
+  guard that requires a version tag to match the package.
+- **README**: an exit-code table, a worked CI example with a one-line severity gate, and
+  the command to run the tests.
+
+### Fixed
+
+- **An unreadable new file no longer vanishes from the payload.** The new-file dedup keyed
+  on `is_file()`, then read the text and silently continued past `OSError`. For a file that
+  exists but cannot be read, that dropped the hunks *and* produced no full-text section:
+  the file appeared nowhere, and the panel reported cleanly on a change it had never seen.
+  Measured: the entire payload collapsed to a single header line. Existence is not
+  readability, so the dedup now keys on the read result, and an unreadable file gets a loud
+  marker instead of a silent gap.
+- **A git ref that cannot be resolved is an error, not an empty review.** `run_git`
+  returned `""` on any non-zero exit, so an unfetched base ref or a shallow clone with no
+  merge base produced "produced no diff — nothing to review" and exit 1, which is
+  indistinguishable from a scope that genuinely had no changes. Routine in CI. It now
+  exits 2 carrying git's own message.
+- **One source of truth for the version.** Three files carried it independently and all
+  three disagreed; a test now pins the manifest, the package and the changelog together.
+
 ## v0.2.2 — 2026-09-02
 
 ### Added

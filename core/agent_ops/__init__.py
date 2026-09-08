@@ -7,4 +7,4 @@ that is in the user's panel.toml.
 
 # Single source of truth for the version. .claude-plugin/plugin.json and the
 # CHANGELOG heading must agree; tests/test_version.py enforces that.
-__version__ = "0.2.2"
+__version__ = "0.3.0"

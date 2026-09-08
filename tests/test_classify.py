@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import pathlib
 
+import pytest
+
 from agent_ops import classify
 from agent_ops.classify import (SEVERITY_RE, SEVERITY_VALUE_RE, SECRET_RE,
                                 classify_seat, max_severity, split_findings)
@@ -216,3 +218,72 @@ def test_severity_value_re_is_built_from_the_presence_pattern():
     """If these two ever diverge, a seat's header style would count for one and not the
     other: findings inferred but no severity, or the reverse."""
     assert SEVERITY_VALUE_RE.pattern.startswith(SEVERITY_RE.pattern)
+
+
+# ---- regressions from the 2026-09-08 dogfood panel -----------------------------------
+
+@pytest.mark.parametrize("header,expected", [
+    ("**SEVERITY:** — High", "high"),          # em dash between colon and level
+    ("SEVERITY: `high`", "high"),              # backticked level
+    ("SEVERITY: - High", "high"),              # bulleted level
+    ("**SEVERITY:** High", "high"),
+    ("- SEVERITY: Medium", "medium"),
+    ("**SEVERITY**: critical", "critical"),
+])
+def test_severity_value_tolerates_the_decoration_seats_actually_emit(header, expected):
+    """Confirmed panel finding (glm, 2026-09-08). These variants all satisfy SEVERITY_RE,
+    so they were COUNTED as findings, while the value pattern read them as unlabelled. A
+    seat that labelled every finding reported as fully unlabelled, and a caller gating on
+    severity had nothing to gate on."""
+    body = f"{header}\nFILE: a.py:1\nWHAT: x\n"
+    assert SEVERITY_RE.search(body), "premise: this header is counted as a finding"
+    assert split_findings(body)[0]["severity"] == expected
+    assert max_severity(body) == expected
+
+
+def test_prose_after_the_colon_is_still_not_a_severity():
+    """The widened gap must not start matching sentences. Letters block it."""
+    body = "SEVERITY: not applicable, low priority\nFILE: a.py:1\nWHAT: x\n"
+    assert split_findings(body)[0]["severity"] is None
+
+
+def test_a_severity_line_inside_a_fenced_block_is_not_a_finding():
+    """Confirmed panel finding (glm, 2026-09-08). A seat writing a FIX often quotes the
+    report format itself. Measured: one real `low` finding whose FIX block quoted a
+    `critical` header split into two findings and reported max_severity `critical` — a CI
+    gate keyed on that blocks a change on the strength of a code sample."""
+    report = ("SEVERITY: low\nFILE: a.py:1\nWHAT: the expected format is\n\n"
+              "```\nSEVERITY: critical\nFILE: x.py:1\n```\n\n"
+              "AUDIT COMPLETE - 1 findings\n")
+    found = split_findings(report)
+    assert len(found) == 1, f"the fenced header started a phantom finding: {found}"
+    assert max_severity(report) == "low", "a quoted level inflated the run's severity"
+    assert "```" in found[0]["text"], (
+        "masking must only affect the boundary search — the finding keeps its code block")
+
+
+def test_tilde_fences_are_masked_too():
+    report = ("SEVERITY: low\nFILE: a.py:1\nWHAT: x\n\n"
+              "~~~\nSEVERITY: critical\n~~~\n\nAUDIT COMPLETE - 1 findings\n")
+    assert len(split_findings(report)) == 1
+    assert max_severity(report) == "low"
+
+
+def test_an_unterminated_fence_still_masks_to_the_end():
+    """A truncated seat can be cut off mid-fence. The dangling block must not spray
+    phantom findings into the inferred count."""
+    report = ("SEVERITY: low\nFILE: a.py:1\nWHAT: x\n\n```\nSEVERITY: critical\n")
+    assert len(split_findings(report)) == 1
+    assert max_severity(report) == "low"
+
+
+def test_inferred_truncated_count_agrees_with_split_findings():
+    """These two must not disagree: the count bounds `verdict <n>`, and split_findings
+    produces the numbers a human reads. A quoted header counted in one and not the other
+    makes a valid verdict look out of range."""
+    report = ("SEVERITY: low\nFILE: a.py:1\nWHAT: x\n\n"
+              "```\nSEVERITY: critical\n```\n\n"
+              "SEVERITY: high\nFILE: b.py:2\nWHAT: y\n")     # no AUDIT COMPLETE: truncated
+    status, count, _ = classify_seat(report, timed_out=False, failed=False)
+    assert status == "truncated"
+    assert count == len(split_findings(report)) == 2, (status, count)

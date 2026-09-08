@@ -28,9 +28,35 @@ SEVERITY_LEVELS = ("low", "medium", "high", "critical")
 
 # Built from SEVERITY_RE's own pattern so markdown tolerance is inherited rather than
 # reimplemented: a seat that bolds or bullets the header must parse the same both ways.
+#
+# The gap before the level accepts the decoration seats actually emit between the colon
+# and the word. Measured against a real panel (2026-09-08): `**SEVERITY:** — High`,
+# ``SEVERITY: `high` `` and `SEVERITY: - High` all satisfied SEVERITY_RE — so they were
+# COUNTED as findings — while a narrower gap read their severity as None. A seat that
+# labelled every finding then reported as unlabelled, and a caller gating on severity had
+# nothing to gate on. Letters are still excluded from the gap, so prose after the colon
+# ("SEVERITY: not applicable, low priority") does not match.
+_SEV_GAP = r"[\s*_`'\"\-\u2013\u2014:>\[\(]*"
 SEVERITY_VALUE_RE = re.compile(
-    SEVERITY_RE.pattern + r"\s*\**\s*(" + "|".join(SEVERITY_LEVELS) + r")\b",
+    SEVERITY_RE.pattern + _SEV_GAP + r"(" + "|".join(SEVERITY_LEVELS) + r")\b",
     re.M | re.I)
+
+_FENCE_RE = re.compile(r"^[ \t]*(```|~~~).*?(?:^[ \t]*\1[ \t]*$|\Z)", re.M | re.S)
+
+
+def _mask_fences(out: str) -> str:
+    """Blank out fenced code blocks, preserving length so offsets stay valid.
+
+    A seat writing a FIX often shows the report format itself, and a fenced
+    `SEVERITY: critical` line satisfies SEVERITY_RE. Measured (2026-09-08): a report whose
+    single real finding was `low` but whose FIX block quoted a `critical` header split
+    into TWO findings and reported max_severity `critical`. A CI gate keyed on that blocks
+    a change on the strength of a code sample — a silent wrong answer, no crash, no log.
+
+    Masking rather than deleting: the caller slices the ORIGINAL text by these offsets, so
+    each finding keeps its code blocks intact. Only the BOUNDARY search is masked.
+    """
+    return _FENCE_RE.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), out)
 
 
 def split_findings(out: str) -> list[dict]:
@@ -40,8 +66,14 @@ def split_findings(out: str) -> list[dict]:
     human reads finding n in a rendered report and then records a judgement against it. So
     this counts from the first SEVERITY header, top to bottom, and drops the preamble
     before it — the same order the seat's own markdown file presents.
+
+    Headers inside fenced code blocks do not start a finding (see _mask_fences). The
+    prompt asks every finding to LEAD with its SEVERITY line; a seat that trails it
+    instead will have its text attributed to the previous finding, which is a known limit
+    of splitting on the only marker the format guarantees.
     """
-    starts = [m.start() for m in SEVERITY_RE.finditer(out)]
+    masked = _mask_fences(out)
+    starts = [m.start() for m in SEVERITY_RE.finditer(masked)]
     if not starts:
         return []
     findings: list[dict] = []
@@ -131,4 +163,7 @@ def classify_seat(out: str, timed_out: bool, failed: bool,
         # content is the contract, and grading unaddressed deliberation would reward the
         # indiscipline this classification screens for.
         return "empty", None, "no content at all (output budget likely spent in reasoning)"
-    return "truncated", len(SEVERITY_RE.findall(out)), ""
+    # Masked for the same reason split_findings masks: a quoted SEVERITY line in a FIX
+    # block is not a finding, and this count is what bounds `verdict <n>`. The two must
+    # not disagree about how many findings a seat wrote.
+    return "truncated", len(SEVERITY_RE.findall(_mask_fences(out))), ""
