@@ -561,3 +561,19 @@ def test_stats_lines_record_reasoning_chars_per_seat(env, fake_provider):
     assert by_model["model-a"]["reasoning_chars"] == 1234
     assert by_model["model-b"]["reasoning_chars"] == 9999
     assert by_model["model-b"]["findings"] is None, "burned seat stays a dead seat"
+
+
+def test_unknown_scope_ref_is_an_error_not_an_empty_review(env, capsys):
+    """Playbook rule 1, at the CLI boundary.
+
+    An unfetched base ref or a shallow clone with no merge base is routine in CI. It used
+    to produce an empty diff and the message 'produced no diff — nothing to review', which
+    is indistinguishable from a scope that genuinely had no changes. It must be an error.
+    """
+    repo, cfg, _ = env
+    rc = main(_argv(repo, cfg, "--scope", "origin/nonexistent...HEAD"))
+    err = capsys.readouterr().err
+    assert rc == 2, f"a ref git cannot resolve must exit 2, got {rc}"
+    assert "could not resolve" in err, err
+    assert "nothing to review" not in err, (
+        "an unresolvable ref must never be reported as an empty review")

@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import pathlib
 import subprocess
-import tempfile
 
-from agent_ops.payload import build_payload, run_git, split_diff_blocks
+import pytest
+
+from agent_ops.payload import GitError, build_payload, run_git, split_diff_blocks
 
 
 def _repo(tmp: pathlib.Path, committed: dict[str, str], then: dict[str, str]) -> pathlib.Path:
@@ -27,6 +28,12 @@ def _repo(tmp: pathlib.Path, committed: dict[str, str], then: dict[str, str]) ->
         (tmp / name).write_text(body, encoding="utf-8")
     run("add", "-A")
     return tmp
+
+
+def _default_branch(repo: pathlib.Path) -> str:
+    """git init's default branch name varies by version and user config."""
+    return subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=repo,
+                          check=True, capture_output=True, text=True).stdout.strip()
 
 
 BODY = "".join(f"line {i} of a file that is long enough to measure\n" for i in range(120))
@@ -196,3 +203,45 @@ def test_truncation_is_loud(tmp_path):
     payload, _, _ = build_payload(repo, "uncommitted", max_payload=500)
     assert "TRUNCATED at 500 chars" in payload
     assert "did NOT see the whole change" in payload
+
+
+def test_run_git_raises_on_an_unknown_ref(tmp_path):
+    """A ref git cannot resolve must be an error, not an empty string that reads as
+    'no changes'. This is the CI failure mode: an unfetched base ref or a shallow clone
+    with no merge base used to surface as a clean, finding-free review."""
+    repo = _repo(tmp_path, {"a.py": "a\n"}, {})
+    with pytest.raises(GitError) as e:
+        run_git(["diff", "no-such-ref-anywhere"], repo)
+    assert "no-such-ref-anywhere" in str(e.value), str(e.value)
+    # check=False keeps the old permissive behaviour for callers that want it.
+    assert run_git(["diff", "no-such-ref-anywhere"], repo, check=False) == ""
+
+
+def test_unknown_scope_ref_reaches_the_caller_as_an_error(tmp_path):
+    repo = _repo(tmp_path, {"a.py": "a\n"}, {})
+    with pytest.raises(GitError):
+        build_payload(repo, "origin/does-not-exist...HEAD")
+
+
+def test_three_dot_range_scope_reviews_only_the_branch_changes(tmp_path):
+    """The scope a PR review uses. It already works via the git-diff fallthrough, but
+    nothing pinned it, so nothing stopped a future refactor from breaking CI silently."""
+    repo = _repo(tmp_path, {"base.py": "base\n"}, {})
+    run = lambda *a: subprocess.run(["git", *a], cwd=repo, check=True,
+                                    capture_output=True, text=True)
+    base_branch = _default_branch(repo)
+    run("checkout", "-qb", "feature")
+    (repo / "feature.py").write_text("FEATURE_LINE = 1\n", encoding="utf-8")
+    run("add", "-A"); run("commit", "-qm", "feature work")
+    # Meanwhile the base branch moves on. A two-dot diff would drag this in; three-dot,
+    # which diffs against the merge base, must not.
+    run("checkout", "-q", base_branch)
+    (repo / "unrelated.py").write_text("UNRELATED_LINE = 1\n", encoding="utf-8")
+    run("add", "-A"); run("commit", "-qm", "unrelated base work")
+    base = run("rev-parse", "HEAD").stdout.strip()
+
+    payload, files, desc = build_payload(repo, f"{base}...feature")
+    assert files == ["feature.py"], files
+    assert "FEATURE_LINE" in payload
+    assert "UNRELATED_LINE" not in payload, (
+        "a three-dot range must diff against the merge base, not the branch tip")

@@ -19,9 +19,27 @@ DEFAULT_MAX_PAYLOAD = 400_000     # chars of diff+files; beyond this we truncate
 SEAT_NOTE_CHARS = 20_000
 
 
-def run_git(args: list[str], cwd: pathlib.Path) -> str:
+class GitError(RuntimeError):
+    """git refused the request. Distinct from 'git ran and the diff was empty'."""
+
+
+def run_git(args: list[str], cwd: pathlib.Path, *, check: bool = True) -> str:
+    """Run git and return stdout. Raise GitError on a non-zero exit when `check`.
+
+    Returning "" on failure conflated two states that must never be confused: a scope with
+    no changes, and a scope git could not resolve at all. The second is routine in CI (an
+    unfetched base ref, a shallow clone with no merge base) and it used to surface as
+    "produced no diff — nothing to review", which is playbook rule 1 exactly: a run that
+    reviewed nothing looking identical to a run that found nothing.
+    """
     p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
-    return p.stdout if p.returncode == 0 else ""
+    if p.returncode != 0:
+        if not check:
+            return ""
+        detail = (p.stderr or p.stdout).strip().splitlines()
+        raise GitError(detail[0] if detail else
+                       f"git {' '.join(args)} exited {p.returncode}")
+    return p.stdout
 
 
 def split_diff_blocks(diff: str) -> list[tuple[str | None, str]]:

@@ -22,7 +22,7 @@ from .config import Config, ConfigError, Seat, load_config
 from .init_cmd import run_init
 from .lease import Lease
 from .panel import family_of, load_probe_seconds, load_seats, pick_panel
-from .payload import SEAT_NOTE_CHARS, build_payload
+from .payload import SEAT_NOTE_CHARS, GitError, build_payload
 from .probe import PROBE_PROMPT_CHARS, run_probe
 from .providers import BaseProvider, make_provider
 from .report import PROMPT_HEAD, append_stats, write_payload, write_seat_report
@@ -345,7 +345,13 @@ def audit(argv: list[str]) -> int:
         print(f"ERROR: {repo} is not a directory", file=sys.stderr)
         return 2
 
-    payload, files, desc = build_payload(repo, a.scope, a.only, config.max_payload)
+    try:
+        payload, files, desc = build_payload(repo, a.scope, a.only, config.max_payload)
+    except GitError as e:
+        # Never let an unresolvable ref read as a clean, empty review.
+        print(f"ERROR: git could not resolve --scope {a.scope!r} in {repo}: {e}",
+              file=sys.stderr)
+        return 2
     if not payload.strip() or not files:
         print(f"NOTE: '{a.scope}' produced no diff in {repo} — nothing to review.",
               file=sys.stderr)
