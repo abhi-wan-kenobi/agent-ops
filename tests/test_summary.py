@@ -130,14 +130,60 @@ def test_split_by_file_summary_lists_every_file_with_its_verdict_id(env, tmp_pat
         assert e["seats"], e
 
 
-def test_summary_is_emitted_once_even_if_two_paths_try(tmp_path):
-    """The signal handler and a normal return can both fire on the way out of a cancelled
-    run. The first description of the run wins; a later one must not overwrite it."""
+def test_summary_is_emitted_once_and_the_exit_code_matches_the_document(tmp_path):
+    """The first description of the run wins, AND a later emit returns the first code.
+
+    Confirmed panel finding (glm, 2026-09-08): returning the caller's argument would let a
+    process exit 0 while summary.json said `cancelled` — the exact silent mismatch this
+    module exists to prevent. The document on disk and the exit status must describe the
+    same run, by construction rather than by which call site happens to run.
+    """
     out = tmp_path / "s.json"
     s = Summary(repo="/x", scope="uncommitted", path=out)
     assert s.emit("cancelled", 130) == 130
-    assert s.emit("done", 0) == 0, "emit must still return the code it was given"
+    assert s.emit("done", 0) == 130, (
+        "a second emit must return the FIRST code, or the exit status and the document "
+        "can disagree")
     assert _read(out)["outcome"] == "cancelled", "the second emit overwrote the first"
+
+
+def test_a_document_that_cannot_be_serialised_does_not_consume_the_only_attempt(tmp_path,
+                                                                               capsys):
+    """Confirmed panel finding (glm, 2026-09-08). Setting the emitted flag before building
+    the document meant one encoding failure silently suppressed every later attempt AND
+    wrote nothing — a run with no record at all, which is the state this file exists to
+    make impossible."""
+    out = tmp_path / "s.json"
+    s = Summary(repo="/x", scope="uncommitted", path=out)
+    s.seats = [{"seat": "a", "family": "f", "status": "ok", "findings": object()}]
+    assert s.emit("done", 0) == 0
+    assert "could not build the run summary" in capsys.readouterr().err
+    assert not out.exists()
+
+    s.seats = [{"seat": "a", "family": "f", "status": "ok", "findings": 1}]
+    assert s.emit("done", 0) == 0, "the retry must still be available"
+    assert _read(out)["outcome"] == "done"
+
+
+def test_a_clean_review_carries_no_severity(tmp_path):
+    """Confirmed panel finding, from the panel's own output (2026-09-08): a seat wrote
+    'SEVERITY: low / WHAT: No defects found' and then 'AUDIT COMPLETE - 0 findings'. The
+    note was shaped like a finding, so a clean review graded as `low`. A gate would then
+    act on a severity nobody claimed."""
+    from agent_ops.main import run_seat
+
+    class OneSeatProvider:
+        def call(self, model, messages, **kw):
+            return SeatOutput(content="SEVERITY: low\nFILE:0\nWHAT: No defects found\n\n"
+                                      "AUDIT COMPLETE - 0 findings\n")
+
+    class S:
+        name, family, provider, model = "s", "fam", "p", "m"
+
+    r = run_seat(OneSeatProvider(), S(), "prompt", tmp_path, timeout=5, max_tokens=10)
+    assert r["status"] == "ok" and r["findings"] == 0
+    assert r["max_severity"] is None, "a clean review must not carry a severity"
+    assert r["severities"] == []
 
 
 def test_a_summary_that_cannot_be_written_does_not_crash_the_run(tmp_path, capsys):

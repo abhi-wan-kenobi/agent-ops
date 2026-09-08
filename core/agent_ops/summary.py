@@ -90,6 +90,7 @@ class Summary:
     seats: list[dict] = dataclasses.field(default_factory=list)
     split: list[dict] | None = None
     _emitted: bool = False
+    _emitted_code: int = 0
 
     def document(self, outcome: str, exit_code: int) -> dict:
         reported = [s for s in self.seats if s.get("findings") is not None]
@@ -118,7 +119,8 @@ class Summary:
             doc["split"] = [
                 {"file": pf["file"],
                  "sub": pf["sub"],
-                 "run_id": f"{self.run_id}/{pf['sub']}" if pf["sub"] else None,
+                 "run_id": (f"{self.run_id}/{pf['sub']}"
+                            if self.run_id and pf["sub"] else None),
                  "status": "reviewed" if pf["results"] is not None else "skipped",
                  "why": pf["why"],
                  "max_severity": _worst(r.get("max_severity")
@@ -128,17 +130,34 @@ class Summary:
         return doc
 
     def emit(self, outcome: str, exit_code: int) -> int:
-        """Write the document and return `exit_code`, so call sites read `return s.emit(...)`.
+        """Write the document and return the exit code, so call sites read `return s.emit(...)`.
 
-        Idempotent: the signal handler and a normal return can both fire on the way out of
-        a cancelled run, and the first one to describe the run wins. Never raises — a
-        summary that cannot be written must not turn a completed review into a crash, so
-        the failure is reported on stderr and the exit code is preserved.
+        Idempotent, and it returns the code of the FIRST emit rather than its argument.
+        That is the whole invariant of this module: the process's exit status and the
+        document on disk describe the same run. If a second call site could return its own
+        code, a job could exit 0 while summary.json said `cancelled` — precisely the
+        silent mismatch the file exists to prevent. Panel finding, 2026-09-08; not
+        reachable through today's call sites, since the signal path raises SystemExit
+        rather than falling through to a return, but the invariant should hold by
+        construction rather than by luck.
+
+        Never raises. A summary that cannot be written must not turn a completed review
+        into a crash, so every failure is reported on stderr and the exit code survives.
+        The document is built BEFORE the emitted flag is set, so a serialisation failure
+        does not silently consume the one chance to describe the run.
         """
         if self._emitted:
+            return self._emitted_code
+        try:
+            # Build AND serialise before committing. Encoding is where a bad field
+            # actually fails, so validating only the dict would set the emitted flag and
+            # then throw the run's one record away in the write.
+            body = _render(self.document(outcome, exit_code))
+        except (TypeError, ValueError) as e:                    # noqa: BLE001
+            print(f">> ⚠️ could not build the run summary: {type(e).__name__}: {e}",
+                  file=sys.stderr)
             return exit_code
-        self._emitted = True
-        doc = self.document(outcome, exit_code)
+        self._emitted, self._emitted_code = True, exit_code
         targets = []
         if self.outdir:
             targets.append(pathlib.Path(self.outdir) / "summary.json")
@@ -146,17 +165,31 @@ class Summary:
             targets.append(pathlib.Path(self.path))
         for t in targets:
             try:
-                write_summary(t, doc)
+                _write_text(t, body)
             except OSError as e:
                 print(f">> ⚠️ could not write summary to {t}: {e}", file=sys.stderr)
-        return exit_code
+        return self._emitted_code
 
 
-def write_summary(path: pathlib.Path, doc: dict) -> None:
+def _render(doc: dict) -> str:
+    return json.dumps(doc, indent=2, sort_keys=False) + "\n"
+
+
+def _write_text(path: pathlib.Path, body: str) -> None:
     """Atomic within the destination directory: a reader must never see a half-written
     document. CI polls this file, and a truncated read parses as a different run."""
     path = pathlib.Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(doc, indent=2, sort_keys=False) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, path)
+    except BaseException:
+        # Residue in a directory a consumer polls is its own kind of confusion.
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_summary(path: pathlib.Path, doc: dict) -> None:
+    """Serialise and atomically write one summary document."""
+    _write_text(path, _render(doc))

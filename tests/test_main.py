@@ -603,3 +603,20 @@ def test_stats_line_carries_max_severity_and_report_path_per_seat(env, tmp_path)
     assert seats["seat-b"]["max_severity"] is None
     assert seats["seat-b"]["findings"] is None
     assert seats["seat-b"]["severities"] == []
+
+
+def test_a_coder_naming_no_family_says_nothing_was_excluded(env, capsys):
+    """Confirmed panel finding (glm, 2026-09-08). `--coder ","` — a broken list join is
+    the realistic source — yields an empty ban set, indistinguishable from no --coder at
+    all. Silence there is exclusion that looks mechanical and is not."""
+    repo, cfg, _ = env
+    main([str(repo), "--config", str(cfg), "--coder", ",,"])
+    err = capsys.readouterr().err
+    assert "names no usable family" in err, err
+    assert "NOTHING is excluded" in err, err
+
+
+def test_a_real_coder_does_not_trigger_the_warning(env, capsys):
+    repo, cfg, _ = env
+    main(_argv(repo, cfg))
+    assert "names no usable family" not in capsys.readouterr().err

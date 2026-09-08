@@ -97,7 +97,13 @@ def run_seat(provider: BaseProvider, seat: Seat, prompt: str, outdir: pathlib.Pa
     # Severity per finding and the worst of them, so a report can be rendered and a CI
     # gate can act without re-parsing markdown. A seat that did not run gets None, never
     # a level — same reasoning as findings=None: it is not entitled to the claim.
-    graded = split_findings(out.content) if status in ("ok", "truncated") else []
+    # The seat's own count is the contract. Measured on a live panel (2026-09-08): a seat
+    # wrote "SEVERITY: low / WHAT: No defects found" and then "AUDIT COMPLETE - 0
+    # findings" — a CLEAN review that graded as `low` because the note was shaped like a
+    # finding. A clean review must carry no severity at all, or a gate acts on a severity
+    # nobody claimed.
+    graded = (split_findings(out.content)
+              if status in ("ok", "truncated") and findings else [])
     return {"model": seat.model, "seat": seat.name, "family": seat.family,
             "findings": findings, "status": status, "reason": reason,
             "truncated": status == "truncated", "seconds": out.seconds,
@@ -419,6 +425,14 @@ def audit(argv: list[str]) -> int:
     if not a.coder and not a.models:
         print(">> ⚠️ no --coder given. Family rotation only works when the panel knows "
               "which family wrote the code — pass --coder <model>.", file=sys.stderr)
+    elif a.coder and not a.models and not {family_of(c) for c in a.coder.split(",")
+                                           if c.strip()}:
+        # Panel finding 2026-09-08: --coder "," (or a broken list join) yields an empty
+        # ban set, which is indistinguishable from no --coder at all. The operator
+        # believes exclusion is in force and it is not — exclusion that looks mechanical
+        # and is not, which is worse than none.
+        print(f">> ⚠️ --coder {a.coder!r} names no usable family — NOTHING is excluded. "
+              f"The panel may include the family that wrote this code.", file=sys.stderr)
     override = a.models.split(",") if a.models else None
     panel = pick_panel(a.coder, a.seats, override, seats)
     if override:

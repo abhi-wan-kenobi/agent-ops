@@ -23,19 +23,37 @@ class GitError(RuntimeError):
     """git refused the request. Distinct from 'git ran and the diff was empty'."""
 
 
-def run_git(args: list[str], cwd: pathlib.Path, *, check: bool = True) -> str:
-    """Run git and return stdout. Raise GitError on a non-zero exit when `check`.
+def run_git(args: list[str], cwd: pathlib.Path) -> str:
+    """Run git and return stdout. Every failure raises GitError; nothing returns "".
 
     Returning "" on failure conflated two states that must never be confused: a scope with
     no changes, and a scope git could not resolve at all. The second is routine in CI (an
     unfetched base ref, a shallow clone with no merge base) and it used to surface as
     "produced no diff — nothing to review", which is playbook rule 1 exactly: a run that
     reviewed nothing looking identical to a run that found nothing.
+
+    There is deliberately NO opt-out flag. A `check=False` escape hatch was written and
+    then removed on a panel finding: it reintroduced the exact conflation this function
+    exists to prevent, and an unused parameter with that semantic is a trap for the next
+    caller who wants "don't fail on a missing ref".
+
+    Three failure modes, one exception type:
+      * non-zero exit — the message is git's own stderr;
+      * git absent from PATH (routine on minimal CI images);
+      * output that is not valid UTF-8. Diff CONTENT lines are emitted raw, so one stray
+        byte in a nominally-text file made the strict default decoder raise
+        UnicodeDecodeError from inside subprocess — neither an empty diff nor a GitError,
+        just a crash. Decoded with errors="replace", matching how this module already
+        reads file text.
     """
-    p = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    try:
+        p = subprocess.run(["git", *args], cwd=cwd, capture_output=True,
+                           text=True, errors="replace")
+    except FileNotFoundError as e:
+        raise GitError("git is not installed or not on PATH") from e
+    except OSError as e:
+        raise GitError(f"could not run git: {e}") from e
     if p.returncode != 0:
-        if not check:
-            return ""
         detail = (p.stderr or p.stdout).strip().splitlines()
         raise GitError(detail[0] if detail else
                        f"git {' '.join(args)} exited {p.returncode}")
@@ -77,6 +95,10 @@ def build_payload(repo: pathlib.Path, scope: str, only: str | None = None,
                   max_payload: int = DEFAULT_MAX_PAYLOAD, *,
                   exact: bool = False) -> tuple[str, list[str], str]:
     """Return (payload, files, description). Payload = diff + full text of changed files.
+
+    Raises GitError when the scope cannot be resolved (see run_git). Callers must handle
+    it: an unresolvable ref is a failed review, and swallowing it here would put back the
+    "nothing to review" ambiguity the exception exists to remove.
 
     `only` narrows to files whose path contains that substring — essential, not optional,
     for multi-file changes: splitting is the difference between a real review and one that

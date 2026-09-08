@@ -213,8 +213,6 @@ def test_run_git_raises_on_an_unknown_ref(tmp_path):
     with pytest.raises(GitError) as e:
         run_git(["diff", "no-such-ref-anywhere"], repo)
     assert "no-such-ref-anywhere" in str(e.value), str(e.value)
-    # check=False keeps the old permissive behaviour for callers that want it.
-    assert run_git(["diff", "no-such-ref-anywhere"], repo, check=False) == ""
 
 
 def test_unknown_scope_ref_reaches_the_caller_as_an_error(tmp_path):
@@ -245,3 +243,43 @@ def test_three_dot_range_scope_reviews_only_the_branch_changes(tmp_path):
     assert "FEATURE_LINE" in payload
     assert "UNRELATED_LINE" not in payload, (
         "a three-dot range must diff against the merge base, not the branch tip")
+
+
+def test_non_utf8_bytes_in_git_output_do_not_crash(tmp_path):
+    """Confirmed panel finding (glm, 2026-09-08), reproduced as a real crash.
+
+    Diff CONTENT lines are emitted raw by git, so one stray byte in a nominally-text file
+    made subprocess's strict default decoder raise UnicodeDecodeError from inside
+    run_git — neither an empty diff nor a GitError, just an unhandled crash in the routine
+    path. The module already reads file text with errors='replace'.
+    """
+    repo = _repo(tmp_path, {"a.txt": "hello\n"}, {})
+    (repo / "a.txt").write_bytes(b"hello\n\xff\xfe not valid utf-8 \xff\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    diff = run_git(["diff", "HEAD"], repo)       # must not raise
+    assert "a.txt" in diff
+    payload, files, _ = build_payload(repo, "uncommitted")
+    assert files == ["a.txt"]
+    assert payload.strip()
+
+
+def test_git_missing_from_path_is_a_git_error(tmp_path, monkeypatch):
+    """Confirmed panel finding (glm, 2026-09-08). Minimal CI images without git are the
+    norm, and FileNotFoundError escaped the error model entirely."""
+    repo = _repo(tmp_path, {"a.txt": "x\n"}, {})
+
+    def no_git(*a, **kw):
+        raise FileNotFoundError(2, "No such file or directory: 'git'")
+
+    monkeypatch.setattr(subprocess, "run", no_git)
+    with pytest.raises(GitError) as e:
+        run_git(["diff", "HEAD"], repo)
+    assert "PATH" in str(e.value), str(e.value)
+
+
+def test_run_git_has_no_failure_swallowing_escape_hatch():
+    """Confirmed panel finding (glm, 2026-09-08): a check=False parameter reintroduced the
+    exact 'empty string means both no-changes and could-not-resolve' conflation this
+    function exists to prevent. Unused, and a trap for the next caller."""
+    import inspect
+    assert "check" not in inspect.signature(run_git).parameters
