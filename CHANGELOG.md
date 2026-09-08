@@ -51,6 +51,40 @@ playbook's first rule is about.
 - **One source of truth for the version.** Three files carried it independently and all
   three disagreed; a test now pins the manifest, the package and the changelog together.
 
+### Fixed — found by running the panel on this release
+
+The OpenRouter path had never been exercised against the real API before this release.
+It has now: all three starter seats scored `good` on both probe stages, and a panel over
+this release's own diff produced these, each reproduced before it was fixed.
+
+- **A `SEVERITY:` line inside a fenced code block started a new finding.** Seats writing a
+  FIX routinely quote the report format itself. Measured: a report whose only real finding
+  was `low`, but whose FIX block quoted a `critical` header, split into two findings and
+  reported `max_severity: critical`. A gate keyed on that blocks a change on the strength
+  of a code sample. Fences are now masked for the boundary search only, so each finding
+  keeps its code blocks.
+- **The severity value pattern did not inherit the markdown tolerance it claimed.**
+  `**SEVERITY:** — High`, a backticked level and `SEVERITY: - High` were all counted as
+  findings while reading as unlabelled, so a seat that labelled everything reported as
+  fully unlabelled.
+- **A clean review could carry a severity.** A seat wrote a "no defects found" note shaped
+  like a finding and then declared zero findings; the note graded the run `low`. The
+  seat's own count is the contract.
+- **Non-UTF-8 bytes in git output crashed the run.** Diff content lines are emitted raw,
+  so one stray byte in a nominally-text file raised `UnicodeDecodeError` from inside
+  `subprocess` — neither an empty diff nor a git error. Now decoded with replacement, as
+  file text already was.
+- **`git` missing from `PATH` escaped the error model**, which minimal CI images make
+  routine.
+- **`--coder ",,"` silently excluded nothing** while looking like exclusion was in force.
+- **The summary could disagree with the exit status**, and an encoding failure could
+  consume the run's only chance at a record.
+
+### Measured
+
+- One three-seat OpenRouter review of a ~9k-char change: **US$0.0047** (2026-09-08). The
+  README and example config previously estimated this; it is now measured.
+
 ## v0.2.2 — 2026-09-02
 
 ### Added

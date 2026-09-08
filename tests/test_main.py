@@ -606,17 +606,30 @@ def test_stats_line_carries_max_severity_and_report_path_per_seat(env, tmp_path)
 
 
 def test_a_coder_naming_no_family_says_nothing_was_excluded(env, capsys):
-    """Confirmed panel finding (glm, 2026-09-08). `--coder ","` — a broken list join is
-    the realistic source — yields an empty ban set, indistinguishable from no --coder at
-    all. Silence there is exclusion that looks mechanical and is not."""
+    """Confirmed panel finding (glm, 2026-09-08). `--coder ",,"` — a shell expansion with
+    empty variables is the realistic source — passes the truthiness check and yields an
+    empty ban set, indistinguishable from passing no --coder at all."""
     repo, cfg, _ = env
     main([str(repo), "--config", str(cfg), "--coder", ",,"])
     err = capsys.readouterr().err
-    assert "names no usable family" in err, err
+    assert "names no family at all" in err, err
     assert "NOTHING is excluded" in err, err
+
+
+def test_an_unmatched_coder_family_is_not_warned_about(env, capsys):
+    """The same panel proposed warning whenever the named family matches no seat, to catch
+    typos. That fix is wrong: a coder family that is not among your seats is the NORMAL,
+    healthy case (you review Claude's work with a deepseek/qwen/glm panel). The warning
+    would fire on correct usage, and one that cries wolf is worse than none."""
+    repo, cfg, _ = env
+    main([str(repo), "--config", str(cfg), "--coder", "claude-opus-4"])
+    err = capsys.readouterr().err
+    assert "NOTHING is excluded" not in err, (
+        "warned about a coder family that is simply not in the panel — normal usage")
 
 
 def test_a_real_coder_does_not_trigger_the_warning(env, capsys):
     repo, cfg, _ = env
     main(_argv(repo, cfg))
     assert "names no usable family" not in capsys.readouterr().err
+

@@ -427,12 +427,20 @@ def audit(argv: list[str]) -> int:
               "which family wrote the code — pass --coder <model>.", file=sys.stderr)
     elif a.coder and not a.models and not {family_of(c) for c in a.coder.split(",")
                                            if c.strip()}:
-        # Panel finding 2026-09-08: --coder "," (or a broken list join) yields an empty
-        # ban set, which is indistinguishable from no --coder at all. The operator
-        # believes exclusion is in force and it is not — exclusion that looks mechanical
-        # and is not, which is worse than none.
-        print(f">> ⚠️ --coder {a.coder!r} names no usable family — NOTHING is excluded. "
-              f"The panel may include the family that wrote this code.", file=sys.stderr)
+        # Panel finding 2026-09-08: --coder "," (a broken list join, e.g. "$A,$B" with
+        # both empty) passes the truthiness check, every fragment is stripped away, and
+        # the ban set ends up empty — indistinguishable from passing no --coder at all,
+        # with no error. The operator believes rotation is in force and it is not.
+        #
+        # The same panel proposed extending this to warn whenever the named families are
+        # disjoint from the configured seats, to catch typos like "cluade-sonnet-5". That
+        # fix is wrong and was reverted after being written: disjoint is the NORMAL state
+        # whenever the coder's family is simply not one of your seats, which is both
+        # common and healthy. The warning would fire on correct usage, and a warning that
+        # cries wolf is worse than none. A right finding can carry a wrong fix
+        # (playbook rule 7) — the typo case is real but is not distinguishable here.
+        print(f">> ⚠️ --coder {a.coder!r} names no family at all — NOTHING is excluded. "
+              f"A family may be reviewing its own work.", file=sys.stderr)
     override = a.models.split(",") if a.models else None
     panel = pick_panel(a.coder, a.seats, override, seats)
     if override:

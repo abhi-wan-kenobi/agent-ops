@@ -21,10 +21,11 @@
 #                                       # queues silently, it does not error
 
 # ── Starter panel: three cheap, diverse OpenRouter families ────────────────────────────
-# Model ids verified against openrouter.ai/api/v1/models on 2026-09-01. Rough cost for a
-# typical review (a few thousand chars of diff, three seats, 8k output budget): well under
-# US$0.05 per run — usually under a cent. If an id has been retired since, `agent_ops
-# probe` will tell you, loudly.
+# Model ids verified against openrouter.ai/api/v1/models on 2026-09-08, and all three
+# scored `good` on both the small and the stress probe the same day. Cost is MEASURED, not
+# estimated: one three-seat review of a ~9k-char change, 8k output budget, billed
+# US$0.0047 on 2026-09-08. If an id has been retired since, `agent_ops probe` will tell
+# you, loudly.
 
 [[seats]]
 name = "seat-a"

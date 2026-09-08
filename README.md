@@ -61,9 +61,9 @@ PYTHONPATH=<plugin>/core python3 -m agent_ops init       # or: init --ollama for
 export OPENROUTER_API_KEY=sk-or-...                      # init prints this line too
 ```
 
-The starter panel is three cheap, diverse OpenRouter families; a typical review costs
-well under US$0.05, usually under a cent. Local Ollama seats are free. `init` never
-overwrites an existing panel.toml.
+The starter panel is three cheap, diverse OpenRouter families. **Measured 2026-09-08**
+against the live API: one three-seat review of a ~9k-char change cost **US$0.0047**.
+Local Ollama seats are free. `init` never overwrites an existing panel.toml.
 
 ## Use
 
