@@ -21,6 +21,53 @@ EMPTY_BODY_CHARS = 200
 # truncated seat could read as 0 when the seat had written findings.
 SEVERITY_RE = re.compile(r"^[ \t>*_#-]*\**\s*SEVERITY\s*\**\s*:", re.M | re.I)
 
+# Ascending. A CI gate and a rendered report both need "how bad is the worst of these",
+# and until now nothing anywhere read a severity VALUE — SEVERITY_RE was used only for
+# presence and counting.
+SEVERITY_LEVELS = ("low", "medium", "high", "critical")
+
+# Built from SEVERITY_RE's own pattern so markdown tolerance is inherited rather than
+# reimplemented: a seat that bolds or bullets the header must parse the same both ways.
+SEVERITY_VALUE_RE = re.compile(
+    SEVERITY_RE.pattern + r"\s*\**\s*(" + "|".join(SEVERITY_LEVELS) + r")\b",
+    re.M | re.I)
+
+
+def split_findings(out: str) -> list[dict]:
+    """Split a seat report into numbered findings, in the order they were written.
+
+    Numbering must match what `agent_ops verdict <run-id> <family> <n>` expects, because a
+    human reads finding n in a rendered report and then records a judgement against it. So
+    this counts from the first SEVERITY header, top to bottom, and drops the preamble
+    before it — the same order the seat's own markdown file presents.
+    """
+    starts = [m.start() for m in SEVERITY_RE.finditer(out)]
+    if not starts:
+        return []
+    findings: list[dict] = []
+    bounds = starts + [len(out)]
+    for i, (a, b) in enumerate(zip(bounds, bounds[1:]), start=1):
+        text = FINDINGS_RE.sub("", out[a:b]).strip()
+        sev = SEVERITY_VALUE_RE.search(text)
+        findings.append({"n": i,
+                         "severity": sev.group(1).lower() if sev else None,
+                         "text": text})
+    return findings
+
+
+def max_severity(out: str) -> str | None:
+    """The worst severity a seat actually labelled, or None if it labelled none.
+
+    None is not "clean" — it means no finding carried a recognisable level. A caller that
+    gates on severity must treat None as unknown, never as safe.
+    """
+    found = {f["severity"] for f in split_findings(out)} - {None}
+    for level in reversed(SEVERITY_LEVELS):
+        if level in found:
+            return level
+    return None
+
+
 # Assembled from fragments so this FILE does not itself contain the literals it hunts for.
 # Written flat, the gate tripped on its own source: any review whose payload included this
 # file refused with "looks like a live credential", so the file that most wants reviewing

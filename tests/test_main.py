@@ -577,3 +577,29 @@ def test_unknown_scope_ref_is_an_error_not_an_empty_review(env, capsys):
     assert "could not resolve" in err, err
     assert "nothing to review" not in err, (
         "an unresolvable ref must never be reported as an empty review")
+
+
+def test_stats_line_carries_max_severity_and_report_path_per_seat(env, tmp_path):
+    """Severity has to survive the whole way to stats.jsonl, or a renderer and a CI gate
+    have to re-parse every seat's markdown to learn what the run already knew."""
+    repo, cfg, root = env
+    FakeProvider.outputs = {
+        "model-a": SeatOutput(content=(
+            "SEVERITY: low\nFILE: a.py:1\nWHAT: minor\n\n"
+            "SEVERITY: critical\nFILE: a.py:2\nWHAT: bad\n\n"
+            "AUDIT COMPLETE - 2 findings\n")),
+        "model-b": SeatOutput(error="boom"),
+    }
+    assert main(_argv(repo, cfg)) == 0
+    line = json.loads((root / "state" / "stats.jsonl").read_text().strip().splitlines()[-1])
+    seats = {s["seat"]: s for s in line["seats"]}
+
+    assert seats["seat-a"]["max_severity"] == "critical"
+    assert seats["seat-a"]["severities"] == ["low", "critical"]
+    assert seats["seat-a"]["report"].endswith("fam-a.md")
+
+    # A seat that never ran gets no severity, for the same reason it gets findings=None:
+    # it is not entitled to a claim about code it never read.
+    assert seats["seat-b"]["max_severity"] is None
+    assert seats["seat-b"]["findings"] is None
+    assert seats["seat-b"]["severities"] == []

@@ -17,7 +17,7 @@ import sys
 import time
 
 from . import __version__, run_state
-from .classify import SECRET_RE, classify_seat
+from .classify import SECRET_RE, classify_seat, max_severity, split_findings
 from .config import Config, ConfigError, Seat, load_config
 from .init_cmd import run_init
 from .lease import Lease
@@ -91,11 +91,19 @@ def run_seat(provider: BaseProvider, seat: Seat, prompt: str, outdir: pathlib.Pa
     status, findings, reason = classify_seat(
         out.content, timed_out=(out.error == "timeout"),
         failed=bool(out.error and out.error != "timeout"), reason=out.error or "")
-    write_seat_report(outdir, seat.family, seat.model, status, reason, out.content)
+    report_path = write_seat_report(outdir, seat.family, seat.model, status, reason,
+                                    out.content)
+    # Severity per finding and the worst of them, so a report can be rendered and a CI
+    # gate can act without re-parsing markdown. A seat that did not run gets None, never
+    # a level — same reasoning as findings=None: it is not entitled to the claim.
+    graded = split_findings(out.content) if status in ("ok", "truncated") else []
     return {"model": seat.model, "seat": seat.name, "family": seat.family,
             "findings": findings, "status": status, "reason": reason,
             "truncated": status == "truncated", "seconds": out.seconds,
             "chars": len(out.content),
+            "max_severity": max_severity(out.content) if graded else None,
+            "severities": [f["severity"] for f in graded],
+            "report": str(report_path),
             # Reasoning volume per run makes the burn cliff measurable from stats.jsonl
             # (reasoning-per-input-char per seat) instead of only observable at death.
             "reasoning_chars": len(out.reasoning)}
@@ -142,7 +150,8 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
             return {"model": seat.model, "seat": seat.name, "family": seat.family,
                     "findings": None, "status": "error",
                     "reason": f"seat crashed: {type(e).__name__}: {e}",
-                    "truncated": False, "seconds": 0.0, "chars": 0}
+                    "truncated": False, "seconds": 0.0, "chars": 0,
+                    "max_severity": None, "severities": [], "report": None}
 
     ex = cf.ThreadPoolExecutor(max_workers=len(panel))
     futures = {ex.submit(safe_runner, s): s for s in panel}
@@ -153,7 +162,8 @@ def run_panel_cooperatively(run_id: str, panel: list[Seat], seat_runner,
         for fut in done:
             r = fut.result()
             run_state.update_seat(run_id, r["model"], status=r["status"],
-                                  findings=r["findings"], seconds=r["seconds"])
+                                  findings=r["findings"], seconds=r["seconds"],
+                                  max_severity=r.get("max_severity"))
             results.append(r)
         if pending and run_state.cancel_requested(run_id):
             for fut in pending:
