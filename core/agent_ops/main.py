@@ -16,7 +16,7 @@ import signal
 import sys
 import time
 
-from . import run_state
+from . import __version__, run_state
 from .classify import SECRET_RE, classify_seat
 from .config import Config, ConfigError, Seat, load_config
 from .init_cmd import run_init
@@ -561,6 +561,9 @@ def _pop_config(argv: list[str]) -> tuple[str | None, list[str]]:
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     cmd = argv[0] if argv else ""
+    if cmd in ("--version", "-V", "version"):
+        print(f"agent-ops {__version__}")
+        return 0
     if cmd == "init":
         return run_init(argv[1:])
     if cmd in ("verdict", "stats"):
