@@ -27,9 +27,12 @@ and the playbook. What's next, in order of intent — dates are aims, not promis
 
 ## v0.4 — exploratory, demand-driven
 
-- GitHub Action: run the panel on pull requests, post the seat reports as a comment.
-  `--summary-json` is the seam it needs; the free path is documented in the README so
-  anyone can wire this by hand today.
+- CI is already wired by hand, and stays that way in core: `--summary-json` plus the
+  worked example in the README are the seam, and they are free forever. What core will
+  **not** grow is a packaged GitHub Action with a pull-request comment renderer — that is
+  a wrapper, it belongs outside the tool, and if it ships it ships as a separate paid
+  distribution rather than as a core feature. Nothing that works today moves behind that
+  line; the earlier plan to maintain a first-party free Action does not stand.
 - `--fail-on <severity>` in the core, if the one-line gate in the README proves too thin.
   Held back deliberately: core exit codes answer "did a review happen", and overloading
   them with "and it found something bad" would conflate a dead panel with a busy one.

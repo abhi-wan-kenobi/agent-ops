@@ -579,6 +579,38 @@ def test_unknown_scope_ref_is_an_error_not_an_empty_review(env, capsys):
         "an unresolvable ref must never be reported as an empty review")
 
 
+def test_only_matching_nothing_says_so_instead_of_no_diff(env, capsys):
+    """Playbook rule 1 again, one flag along.
+
+    `--only` takes one path substring. Hand it a comma list, or a typo, and every changed
+    file is filtered out; the run then printed 'produced no diff — nothing to review' and
+    exited 1. A CI job wired that way is green for as long as nobody looks. The two cases
+    differ by one git call, so the message has to differ too. Found 2026-09-08.
+    """
+    repo, cfg, _ = env
+    rc = main(_argv(repo, cfg, "--only", "a.py,b.py"))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "matched none of the" in err, err
+    assert "ONE path substring" in err, err
+    assert "produced no diff" not in err, (
+        "an over-narrow filter must not read as an empty scope")
+
+
+def test_a_genuinely_empty_scope_still_says_no_diff(env, capsys):
+    """The other half of the pair: with nothing changed, --only is not to blame."""
+    repo, cfg, _ = env
+    import subprocess
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True,
+                   capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "clean"], cwd=repo, check=True,
+                   capture_output=True)
+    rc = main(_argv(repo, cfg, "--only", "a.py"))
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "produced no diff" in err, err
+
+
 def test_stats_line_carries_max_severity_and_report_path_per_seat(env, tmp_path):
     """Severity has to survive the whole way to stats.jsonl, or a renderer and a CI gate
     have to re-parse every seat's markdown to learn what the run already knew."""

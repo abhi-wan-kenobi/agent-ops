@@ -1,6 +1,7 @@
 {
   "$schema": "https://code.claude.com/schemas/marketplace.json",
   "name": "agent-ops",
+  "description": "Adversarial code review for AI-written code: a panel of independent model families, the coder's own family excluded, and the operating rules for reading findings that are a third wrong.",
   "owner": {
     "name": "Abhishek Gupta",
     "url": "https://abhishek.be"

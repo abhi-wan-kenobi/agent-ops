@@ -1,5 +1,54 @@
 # Changelog
 
+## v0.3.1 — 2026-09-09
+
+Theme: **everything a stranger's first run hits.** Every item here was found by reinstalling
+the plugin from GitHub into a clean profile and following the README, which is the one test
+no unit suite performs. Four of the five fixes are silent-absence bugs, the class the
+playbook's first rule is about.
+
+### Fixed
+
+- **`init` now follows `AGENT_OPS_HOME`.** It read the frozen module-level default instead
+  of resolving the variable, so on a clean machine it wrote `~/.agent-ops/panel.toml` while
+  `audit` and `probe` read the scratch home and found no config at all. v0.3.0 claimed the
+  variable moved config, reports and state together; it moved two of the three.
+- **The secret gate recognises the two keys this project tells you to export.** The generic
+  pattern is `sk-` followed by twenty or more alphanumerics, and both `sk-or-v1-…`
+  (OpenRouter, the documented default) and `sk-ant-…` (Anthropic) put a hyphen three
+  characters in, ending the run. Neither ever matched, in either direction: the outbound
+  refusal that stops a live credential reaching a third-party model, and the inbound
+  redaction of provider error text. Both shapes are now named explicitly rather than the
+  generic pattern being loosened, because `sk-[A-Za-z0-9_-]{20,}` matches
+  `risk-management-strategies` and would refuse to review ordinary English.
+- **An HTTP 200 carrying an error envelope is an error, not a dead seat.** OpenRouter
+  answers 200 with `{"error": {...}}` and no `choices` when the upstream it routed to
+  fails. That became empty content, which classifies as a dead seat, so the provider's own
+  explanation was thrown away and the operator went hunting the model instead of the route.
+  Measured live: 2 of 6 identical calls to one starter-panel seat.
+- **`--only` that matches nothing says so.** It takes one path substring; hand it a comma
+  list or a typo and every changed file is filtered out, which reported "produced no diff —
+  nothing to review" and exited 1. A CI job wired that way stays green until somebody
+  looks. The two cases differ by one `git` call, so the message now differs too and names
+  the files that did change.
+- **The secret gate's own tests can be reviewed.** Five credential-shaped literals sat flat
+  in `tests/test_classify.py`, so any review touching that file refused on its own
+  fixtures. `classify.py` has been fragmented against this since v0.1; its tests had not
+  been. Now pinned by a test.
+
+### Changed
+
+- **The starter panel's third seat is `z-ai/glm-4.7-flash`**, replacing
+  `z-ai/glm-5.3-flash`. This is not a price or a quality decision: OpenRouter fans one
+  model id across several upstream providers, and they are not equally reliable. Six
+  identical probe calls on 2026-09-08 gave `glm-5.3-flash` four usable replies, one empty
+  body from Morph and one 200 error envelope, while `minimax/minimax-m2.7`,
+  `openai/gpt-oss-120b` and the new `glm-4.7-flash` each returned six from six. A bare
+  model id does not describe a seat. Both copies of the starter panel now say so, and a
+  test pins them to each other, because they had already drifted once.
+- The marketplace manifest carries a description, so `claude plugin validate` passes with
+  no warnings.
+
 ## v0.3.0 — 2026-09-08
 
 Theme: **a machine can now consume a review.** v0.1 proved a stranger could install it,

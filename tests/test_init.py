@@ -78,3 +78,40 @@ def test_unwritable_target_is_a_clean_error_not_a_traceback(tmp_path, capsys):
         os.chmod(ro, 0o700)
     assert rc == 1
     assert "ERROR: cannot write" in capsys.readouterr().err
+
+
+def test_init_follows_agent_ops_home(tmp_path, monkeypatch, capsys):
+    """init with no --config must write under AGENT_OPS_HOME, like every other subcommand.
+
+    v0.3.0 shipped it reading the frozen DEFAULT_CONFIG_PATH literal instead, so `init`
+    wrote to ~/.agent-ops while `audit` and `probe` read the scratch home — on a machine
+    that already had a panel it refused outright, and on a clean one it wrote a config the
+    rest of the tool could not see. Found in the clean-profile install rerun, 2026-09-08.
+    """
+    scratch = tmp_path / "home"
+    monkeypatch.setenv("AGENT_OPS_HOME", str(scratch))
+    assert run_init([]) == 0
+    written = scratch / "panel.toml"
+    assert written.is_file(), "init ignored AGENT_OPS_HOME"
+    assert load_config(written).seats
+    # And the next-steps block must not tell the user to pass --config for a default path.
+    assert "--config" not in capsys.readouterr().out
+
+
+def test_init_starter_panel_matches_panel_example():
+    """init's embedded panel and panel.example.toml are two copies of one decision.
+
+    They already drifted once (the dated verification comment), and a drift in the MODEL
+    IDS would hand new users a panel that was never probed. The comment in both files says
+    'keep the two in sync'; this is what makes that true.
+    """
+    import pathlib
+    import tomllib
+
+    from agent_ops.init_cmd import OPENROUTER_TOML
+
+    example = pathlib.Path(__file__).resolve().parents[1] / "panel.example.toml"
+    theirs = tomllib.loads(example.read_text(encoding="utf-8"))["seats"]
+    ours = tomllib.loads(OPENROUTER_TOML)["seats"]
+    key = lambda s: (s["family"], s["provider"], s["model"])   # noqa: E731
+    assert [key(s) for s in ours] == [key(s) for s in theirs]

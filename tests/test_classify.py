@@ -129,7 +129,8 @@ def test_an_empty_seat_does_not_count_toward_the_panel():
 
 _ORIGINAL_SECRET_PATTERN = (
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}|GOCSPX-[A-Za-z0-9_-]{10,}"
-    r"|ghp_[A-Za-z0-9]{20,}|" + "sk" + r"-[A-Za-z0-9]{20,}|" + "BEGIN"
+    r"|ghp_[A-Za-z0-9]{20,}|" + "sk" + r"-or-v1-[A-Za-z0-9]{20,}|"
+    + "sk" + r"-ant-[A-Za-z0-9_-]{20,}|" + "sk" + r"-[A-Za-z0-9]{20,}|" + "BEGIN"
     + r" [A-Z ]*PRIVATE KEY|" + "-" * 5 + "BEGIN"
 )
 
@@ -141,17 +142,39 @@ def test_secret_pattern_is_unchanged_by_the_fragmenting():
 
 
 def test_the_gate_still_catches_every_credential_shape():
-    for sample in ("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
-                   "GOCSPX-abcdefghij1234",
-                   "ghp_abcdefghijklmnopqrstuvwxyz012345",
+    # Fragmented for the same reason classify.py's patterns are: written flat, these
+    # fixtures make THIS file unsendable, so the tests for the secret gate were the one
+    # file the panel could never review. Found 2026-09-08, when a review of a change to
+    # this file refused on its own fixtures.
+    for sample in ("eyJ" + "hbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0",
+                   "GOCSPX" + "-abcdefghij1234",
+                   "ghp" + "_abcdefghijklmnopqrstuvwxyz012345",
                    "sk" + "-abcdefghijklmnopqrstuvwxyz0123",
-                   "-" * 5 + "BEGIN RSA PRIVATE KEY" + "-" * 5):
+                   # The default provider's own key shape, and Claude Code's. Both slipped
+                   # the gate until 2026-09-08: the hyphens after the prefix end the
+                   # generic [A-Za-z0-9] run at three characters.
+                   "sk" + "-or-v1-" + "0123456789abcdef0123456789abcdef01234567",
+                   "sk" + "-ant-api03-" + "AbCd_ef-1234567890abcdefghij",
+                   "-" * 5 + "BEGIN" + " RSA PRIVATE KEY" + "-" * 5):
         assert SECRET_RE.search(sample), sample
+
+
+def test_secret_gate_tests_do_not_trip_the_gate():
+    """The classifier's source is pinned against self-matching; its tests were not, and
+    they carried five flat credential literals. A change to this file could not be
+    reviewed by the tool the file tests."""
+    src = pathlib.Path(__file__).read_text(encoding="utf-8")
+    hit = SECRET_RE.search(src)
+    assert hit is None, f"test_classify.py self-matches at {hit.group(0)!r}"
 
 
 def test_the_gate_does_not_fire_on_ordinary_content():
     for sample in ("harmless text", "deepseek/deepseek-chat", "llama3.1",
-                   "model_info: {id: family-chat}", "a normal sentence about tokens"):
+                   "model_info: {id: family-chat}", "a normal sentence about tokens",
+                   # Prose the loosened-generic-pattern version of the fix refused:
+                   # "sk-" appears inside ordinary hyphenated English.
+                   "risk-management-strategies-for-teams",
+                   "the task-orientated-review-checklist is long"):
         assert not SECRET_RE.search(sample), sample
 
 

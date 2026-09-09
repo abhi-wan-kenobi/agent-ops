@@ -15,10 +15,12 @@ import argparse
 import pathlib
 import sys
 
-from .config import DEFAULT_CONFIG_PATH, ConfigError, load_config
+from .config import ConfigError, default_config_path, load_config
 
-# Model ids verified against openrouter.ai/api/v1/models on 2026-09-01 (same starter panel
-# as panel.example.toml — keep the two in sync when either changes).
+# Model ids verified against openrouter.ai/api/v1/models on 2026-09-08 (same starter panel
+# as panel.example.toml — keep the two in sync when either changes). All three sampled 6/6
+# usable replies on the probe payload that day; see panel.example.toml for why route
+# stability, not just price, decides this list.
 OPENROUTER_TOML = """\
 # agent-ops panel — written by `agent_ops init`. Edit freely; this file is yours.
 #
@@ -46,7 +48,7 @@ model = "openai/gpt-oss-120b"
 name = "seat-c"
 family = "glm"
 provider = "openrouter"
-model = "z-ai/glm-5.3-flash"
+model = "z-ai/glm-4.7-flash"
 
 # ── Free path: a local Ollama model, no API key at all ─────────────────────────────────
 # [[seats]]
@@ -116,10 +118,15 @@ def run_init(argv: list[str]) -> int:
                         help="OpenRouter starter panel (default): one key, three families")
     flavor.add_argument("--ollama", action="store_true",
                         help="local-Ollama starter panel: no key at all")
-    ap.add_argument("--config", help=f"where to write it (default {DEFAULT_CONFIG_PATH})")
+    # default_config_path(), not the DEFAULT_CONFIG_PATH literal: the literal is frozen at
+    # import time and does not follow AGENT_OPS_HOME, so `init` wrote to ~/.agent-ops while
+    # every other subcommand read the scratch home. Found in the v0.3.0 clean-profile
+    # install rerun, 2026-09-08.
+    default_target = default_config_path()
+    ap.add_argument("--config", help=f"where to write it (default {default_target})")
     a = ap.parse_args(argv)
 
-    target = pathlib.Path(a.config or DEFAULT_CONFIG_PATH).expanduser()
+    target = pathlib.Path(a.config).expanduser() if a.config else default_target
     text = OLLAMA_TOML if a.ollama else OPENROUTER_TOML
     try:
         target.parent.mkdir(parents=True, exist_ok=True)

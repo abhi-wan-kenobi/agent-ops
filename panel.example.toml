@@ -26,6 +26,13 @@
 # estimated: one three-seat review of a ~9k-char change, 8k output budget, billed
 # US$0.0047 on 2026-09-08. If an id has been retired since, `agent_ops probe` will tell
 # you, loudly.
+#
+# These three were chosen for ROUTE stability, not only for price. OpenRouter fans one
+# model id out across several upstream providers, and they are not equally reliable: six
+# identical probe calls on 2026-09-08 gave 6/6 usable replies for each seat below, while
+# two other cheap candidates gave 4/6 and 5/6 — every failure an empty body from one bad
+# upstream, which reads as a dead seat. If a seat here starts probing `fail`, suspect the
+# route before the model.
 
 [[seats]]
 name = "seat-a"
@@ -43,7 +50,7 @@ model = "openai/gpt-oss-120b"
 name = "seat-c"
 family = "glm"
 provider = "openrouter"
-model = "z-ai/glm-5.3-flash"
+model = "z-ai/glm-4.7-flash"
 
 # ── Free path: a local Ollama model, no API key at all ─────────────────────────────────
 # Uncomment if you run Ollama locally (https://ollama.com). A local seat is free and
