@@ -395,6 +395,24 @@ def audit(argv: list[str]) -> int:
               file=sys.stderr)
         return summary.emit("git-error", 2)
     if not payload.strip() or not files:
+        # "The scope is empty" and "your --only excluded every changed file" are the same
+        # exit today, and the second one is a misconfiguration that reads as a clean
+        # review forever. They are distinguishable for the cost of one more git call, so
+        # distinguish them. Found 2026-09-08 by passing --only a comma list, which it does
+        # not accept: three real changed files, and the run said "nothing to review".
+        if a.only:
+            try:
+                _, all_files, _ = build_payload(repo, a.scope, None, config.max_payload)
+            except GitError:                                          # pragma: no cover
+                all_files = []
+            if all_files:
+                shown = ", ".join(all_files[:8])
+                more = f" (+{len(all_files) - 8} more)" if len(all_files) > 8 else ""
+                print(f"NOTE: --only {a.only!r} matched none of the {len(all_files)} "
+                      f"changed file(s) in '{a.scope}' — nothing was reviewed.\n"
+                      f"      --only takes ONE path substring, not a list. Changed: "
+                      f"{shown}{more}", file=sys.stderr)
+                return summary.emit("no-diff", 1)
         print(f"NOTE: '{a.scope}' produced no diff in {repo} — nothing to review.",
               file=sys.stderr)
         return summary.emit("no-diff", 1)

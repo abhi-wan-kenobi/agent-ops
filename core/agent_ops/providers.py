@@ -124,6 +124,19 @@ class BaseProvider:
                     continue
                 return out(error=f"transport error: {type(e).__name__}")
 
+            # An OpenAI-compatible gateway can answer 200 with an error envelope and no
+            # choices at all — OpenRouter does exactly this when the upstream provider it
+            # routed to fails. Measured 2026-09-08: 2 of 6 identical probe calls to
+            # z-ai/glm-5.3-flash came back that way. Falling through to `{}` here turned
+            # the provider's own explanation into "empty content", which reads as a dead
+            # seat and sends the operator hunting the model instead of the route. Silent
+            # absence, in the tool whose first playbook rule is about silent absence.
+            if not data.get("choices") and data.get("error") is not None:
+                err = data["error"]
+                detail = err.get("message") if isinstance(err, dict) else str(err)
+                detail = SECRET_RE.sub("[REDACTED]", str(detail or "").strip())[:200]
+                return out(error=f"provider error: {detail}" if detail
+                           else "provider error (no message)")
             try:
                 ch = (data.get("choices") or [{}])[0]
                 msg = ch.get("message") or {}

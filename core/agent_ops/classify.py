@@ -109,7 +109,14 @@ _SECRET_PATTERNS = (
     r"eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}",   # JWT
     r"GOCSPX-[A-Za-z0-9_-]{10,}",                   # Google OAuth client secret
     r"ghp_[A-Za-z0-9]{20,}",                        # GitHub PAT
-    "sk" + r"-[A-Za-z0-9]{20,}",                    # OpenAI/Anthropic-style key
+    # The two key shapes this tool's own README tells the user to export both contain
+    # hyphens inside the prefix, so the generic pattern below stops after three
+    # characters and never fires. Named explicitly rather than by loosening the generic
+    # one to [A-Za-z0-9_-]: unanchored, that would match "risk-management-strategies"
+    # and refuse to review ordinary prose. Found 2026-09-08.
+    "sk" + r"-or-v1-[A-Za-z0-9]{20,}",              # OpenRouter
+    "sk" + r"-ant-[A-Za-z0-9_-]{20,}",              # Anthropic
+    "sk" + r"-[A-Za-z0-9]{20,}",                    # OpenAI-style key
     "BEGIN" + r" [A-Z ]*PRIVATE KEY",
     "-" * 5 + "BEGIN",                              # any PEM armour
 )

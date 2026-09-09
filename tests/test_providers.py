@@ -189,6 +189,42 @@ def test_empty_content_is_success_with_empty_string(server):
     assert out.reasoning == "burned it all"
 
 
+def test_two_hundred_error_envelope_is_an_error_not_a_dead_seat(server):
+    """Measured 2026-09-08 against the real OpenRouter endpoint: 2 of 6 identical probe
+    calls to the starter panel's third seat came back HTTP 200 with an error envelope and
+    no `choices` at all. Read as empty content, that is indistinguishable from a model
+    burning its budget — the operator hunts the model instead of the route, and the
+    upstream's own explanation is thrown away.
+    """
+    server.responses = [(200, json.dumps(
+        {"error": {"code": 502, "message": "Provider returned error"}}).encode())]
+    out = _provider(server).call("m1", MSGS, max_tokens=10)
+    assert out.error is not None, "a 200 error envelope must not read as a dead seat"
+    assert "Provider returned error" in out.error
+    assert out.content == ""
+
+
+def test_two_hundred_error_envelope_is_secret_redacted(server):
+    """Same inbound-redaction rule as finding E: an error body that echoes request
+    context must not put a credential in a seat report."""
+    leak = "sk-or-v1-" + "a" * 40
+    server.responses = [(200, json.dumps(
+        {"error": {"message": f"upstream rejected key {leak}"}}).encode())]
+    out = _provider(server).call("m1", MSGS, max_tokens=10)
+    assert leak not in (out.error or "")
+    assert "[REDACTED]" in (out.error or "")
+
+
+def test_error_envelope_alongside_choices_is_still_a_report(server):
+    """A gateway that sends a warning envelope AND a real completion must not lose the
+    completion. Only a missing `choices` is the failure."""
+    body = json.loads(_ok_body("the report").decode())
+    body["error"] = None
+    server.responses = [(200, json.dumps(body).encode())]
+    out = _provider(server).call("m1", MSGS, max_tokens=10)
+    assert out.error is None and out.content == "the report"
+
+
 def test_openrouter_type_adds_attribution_header(server):
     server.responses = [(200, _ok_body("x"))]
     p = _provider(server, type_="openrouter")
