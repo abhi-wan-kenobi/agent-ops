@@ -1,0 +1,49 @@
+{
+  "rules": [
+    {
+      "path": "core/agent_ops/config.py",
+      "rule": "This file loads and validates the user-owned `panel.toml`. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the default config paths (`~/.agent-ops/panel.toml`), output root (`~/.agent-ops/audits`), and state dir (`~/.agent-ops/state`) overridable via `AGENT_OPS_HOME`.\n- Keep every numeric default (`DEFAULT_MAX_PAYLOAD=400_000`, `DEFAULT_MAX_TOKENS=8000`, `DEFAULT_LEASE_SLOTS=1`) defined as a documented constant, not an inline literal.\n\n## Documentation Sync\n- Any change to the `[agent_ops]` table schema (e.g. adding/removing `max_payload`, `max_tokens`, `lease_slots`, `state_dir`, `outroot`) must update `README.md` § Requirements/Install/Use, `docs/PLAYBOOK.md` if it touches failure modes, and `panel.example.toml`.\n- The comment on `DEFAULT_LEASE_SLOTS` documents account contention: `\"One panel at a time. Concurrency against a rate-limited endpoint does not fail cleanly — it queues, and the tail grows until a seat blows its budget.\"` (`config.py:55-56`). Do not silently drop or weaken this comment when changing lease logic; if the default or behavior changes, the comment and `panel.example.toml` must change together.\n\n## Test Coverage\n- Any new config key MUST be validated with a type/positive-integer check and a test in `tests/test_config.py`. Any change to default values must update `tests/test_init.py` or the shipped-tree tests if they assert on the example config.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "core/agent_ops/main.py",
+      "rule": "This file implements the review CLI, payload building, panel selection, lease acquisition, seat execution, and summary emission. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the `--scope` / `--only` / `--split-by-file` scoping behavior: `--only` is ONE path substring, `--split-by-file` runs one panel per changed file sequentially under one lease.\n- Keep the exit-code contract (0 = panel convened and at least one seat reported; 1 = nothing reviewed or split run left files unreviewed; 2 = config/git/provider/ref; 3 = refused secret; 7 = lease held; 8 = cancelled; 130 = killed).\n- Keep the summary written on every exit path, including the ones that produce no report directory.\n\n## Documentation Sync\n- Any change to the exit-code table, the `--only` semantics, or the `--split-by-file` behavior must update `README.md` § \"Exit codes\" and \"Use\".\n- Any change to the payload truncation behavior (`max_payload`, the `[TRUNCATED at …]` marker, the soft note at `SEAT_NOTE_CHARS`) must update `docs/PLAYBOOK.md` rules 1 and 8 and the README discussion of scoped payloads.\n\n## Test Coverage\n- New CLI flags or changed defaults must have coverage in `tests/test_main.py`. Changes to `--split-by-file` must have coverage in the split-file tests. Dead-seat and truncation handling must keep their existing tests.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "core/agent_ops/payload.py",
+      "rule": "This file builds the exact text that leaves the machine for a review. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep `DEFAULT_MAX_PAYLOAD = 400_000` as the truncation threshold and `SEAT_NOTE_CHARS = 20_000` as the soft-note threshold.\n- Keep `run_git` raising `GitError` on every failure and never returning an empty string for a failed invocation.\n\n## Documentation Sync\n- Any change to `DEFAULT_MAX_PAYLOAD`, the truncation marker, or the `--only`/`exact` scoping rules must update `README.md` and `docs/PLAYBOOK.md` rules 1 and 8, because the playbook explicitly warns about payloads over ~150k chars hitting shell argument limits and truncated reports being partial audits.\n\n## Test Coverage\n- Payload edge cases (new unreadable files, deleted files, substring-vs-exact `only`, UnicodeDecodeError handling) must keep their tests in `tests/test_payload.py`.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "core/agent_ops/panel.py",
+      "rule": "This file selects the panel of seats and excludes the coder's family. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the rule that a model must never review its own family's work; do not add an opt-out or override that defeats family exclusion.\n- Keep dead-seat detection (empty body, timeout, transport error, truncation) distinct from agreement.\n\n## Documentation Sync\n- Any change to seat selection, probing, or dead-seat classification must update `docs/PLAYBOOK.md` rules 2, 3, 4, and 9 and the README `probe` / seat descriptions.\n\n## Test Coverage\n- Changes to family exclusion or dead-seat logic must update `tests/test_panel.py` and the fake-provider tests in `tests/test_main.py`.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "core/agent_ops/lease.py",
+      "rule": "This file implements cooperative lease acquisition so panels stay serial against shared endpoints. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the lease serial-by-default (`DEFAULT_LEASE_SLOTS=1`). Do not raise the default concurrency cap without explicit measurement and documentation.\n\n## Documentation Sync\n- The comment on `DEFAULT_LEASE_SLOTS` in `config.py` and the `lease_slots` value in `panel.example.toml` must stay consistent. If `lease_slots` becomes configurable in a new way, document the account-contention rationale (`config.py:55-56`, `docs/PLAYBOOK.md` rule 9) and never silently drop it.\n\n## Test Coverage\n- Lease behavior changes must update `tests/test_lease.py`.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "core/agent_ops/report.py",
+      "rule": "This file formats seat reports and appends run statistics. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the `# ⚠️ TRUNCATED` header and the `# ⛔ SEAT DID NOT RUN` header worded exactly as the classify/summary code expects.\n\n## Documentation Sync\n- Any change to report headers or the stats JSONL schema must update `README.md` CI-gate examples and `docs/PLAYBOOK.md` rule 8 (TRUNCATED means partial).\n\n## Test Coverage\n- Report format changes must update `tests/test_summary.py` and any test that parses report files.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "README.md",
+      "rule": "This is the user-facing documentation. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the install paths, the panel setup commands, the exit-code table, and the CI gate example consistent with the code.\n\n## Documentation Sync\n- Any documented command, flag, or config key must exist in the code. Do not describe `--only` as taking a list; it takes one path substring.\n- The three failure modes from `docs/PLAYBOOK.md` (payloads over ~150k chars hitting argument-list-too-long, TRUNCATED reports being partial, ~1/3 of findings being false positives with line/position drift) must remain referenced when describing scoped payloads and how to read reports.\n\n## Test Coverage\n- README command examples should be runnable; if a code change breaks an example, fix the README.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "docs/PLAYBOOK.md",
+      "rule": "This is the operating manual for reading panel output. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep the rules ordered by damage caused and keep each rule tied to a real recorded failure.\n\n## Documentation Sync\n- Any code change that addresses or changes a failure mode documented here (clean exit vs clean audit, dead seats, family exclusion, scoped payload limits, truncation, false-positive rates, lease contention) must update the matching rule and add a regression test.\n\n## Test Coverage\n- A playbook change that adds a new failure mode should ideally be paired with a test or at least a code change that makes the failure detectable.",
+      "merge_system_rule": true
+    },
+    {
+      "path": "panel.example.toml",
+      "rule": "This file is the reference panel configuration. When reviewing changes here, enforce ALL of the following:\n\n## Style Consistency\n- Keep `[agent_ops].lease_slots = 1` and its comment about account contention unless the default changes, in which case update `core/agent_ops/config.py` and `README.md` together.\n\n## Documentation Sync\n- Any added seat/provider example must be consistent with the provider types supported by `config.py` and the provider implementation in `core/agent_ops/providers.py`.\n\n## Test Coverage\n- `tests/test_config.py` and `tests/test_shipped_tree.py` assert this file parses and matches the defaults; update them when the example changes.",
+      "merge_system_rule": true
+    }
+  ]
+}
