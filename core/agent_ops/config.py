@@ -66,6 +66,20 @@ class Seat:
     family: str
     provider: str
     model: str
+    # Extra chat-request body fields for this seat only — e.g. OpenRouter provider
+    # routing, `{ provider = { only = ["Venice"] } }`, to pin a seat to a route that
+    # probes clean. Merged UNDER the fields the client owns (see RESERVED_PARAMS), so no
+    # config line can change which model runs, what it is sent, or its output budget.
+    params: dict = dataclasses.field(default_factory=dict)
+
+
+# Body fields a seat's `params` may not set. model/messages are the review itself;
+# max_tokens is the calibrated budget above, and max_completion_tokens is the same budget
+# under its newer OpenAI name; stream would hand the client an SSE body it cannot parse.
+# Refused at load (a typo'd override should fail loudly, not be silently dropped) AND
+# re-applied after the merge in providers.call.
+RESERVED_PARAMS = frozenset({"model", "messages", "max_tokens", "max_completion_tokens",
+                             "stream"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -121,6 +135,35 @@ def _require_str(table: dict, key: str, where: str) -> str:
     if not isinstance(v, str) or not v.strip():
         raise ConfigError(f"{where}: '{key}' is required and must be a non-empty string")
     return v.strip()
+
+
+def _check_json_value(v, where: str) -> None:
+    # TOML has date/time types; JSON does not. Catch them here with the key's path
+    # instead of letting json.dumps raise mid-panel.
+    if isinstance(v, dict):
+        for k, sub in v.items():
+            _check_json_value(sub, f"{where}.{k}")
+    elif isinstance(v, list):
+        for i, sub in enumerate(v):
+            _check_json_value(sub, f"{where}[{i}]")
+    elif not isinstance(v, (str, int, float, bool)):
+        raise ConfigError(f"{where}: {type(v).__name__} values cannot be sent in a "
+                          f"JSON request body")
+
+
+def _seat_params(table: dict, where: str) -> dict:
+    params = table.get("params")
+    if params is None:
+        return {}
+    if not isinstance(params, dict):
+        raise ConfigError(f"{where}: 'params' must be a table, e.g. "
+                          f"params = {{ provider = {{ only = [\"Venice\"] }} }}")
+    reserved = sorted(RESERVED_PARAMS.intersection(params))
+    if reserved:
+        raise ConfigError(f"{where}: 'params' cannot set {', '.join(reserved)} — "
+                          f"those request fields are owned by the seat and [agent_ops]")
+    _check_json_value(params, f"{where}: params")
+    return params
 
 
 def load_config(path: str | pathlib.Path | None = None) -> Config:
@@ -206,6 +249,7 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
             family=_require_str(table, "family", where).lower(),
             provider=_require_str(table, "provider", where),
             model=_require_str(table, "model", where),
+            params=_seat_params(table, where),
         )
         if seat.name in seen_names:
             raise ConfigError(f"{where}: duplicate seat name {seat.name!r}")

@@ -21,7 +21,7 @@ import urllib.request
 
 from . import __version__
 from .classify import SECRET_RE
-from .config import ConfigError, ProviderConfig
+from .config import RESERVED_PARAMS, ConfigError, ProviderConfig
 
 USER_AGENT = f"agent-ops/{__version__}"
 
@@ -79,10 +79,17 @@ class BaseProvider:
     # -- API ---------------------------------------------------------------------------
 
     def call(self, model: str, messages: list[dict], *, max_tokens: int,
-             temperature: float | None = None, timeout: float = 900.0) -> SeatOutput:
+             temperature: float | None = None, timeout: float = 900.0,
+             params: dict | None = None) -> SeatOutput:
         """One chat completion. Never raises for transport problems — the panel must keep
-        running its other seats — so every failure lands in SeatOutput.error instead."""
-        body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        running its other seats — so every failure lands in SeatOutput.error instead.
+
+        `params` (a seat's config `params`) goes in FIRST and the client-owned fields are
+        written over it, so even a params dict that bypassed load_config's refusal cannot
+        change the model, messages or output budget. It only ever reaches the body, never
+        the headers, so auth stays where _headers puts it."""
+        body: dict = {k: v for k, v in (params or {}).items() if k not in RESERVED_PARAMS}
+        body.update(model=model, messages=messages, max_tokens=max_tokens)
         if temperature is not None:
             body["temperature"] = temperature
 

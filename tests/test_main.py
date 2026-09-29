@@ -33,7 +33,8 @@ class FakeProvider:
     def __init__(self, cfg):
         self.cfg = cfg
 
-    def call(self, model, messages, *, max_tokens, temperature=None, timeout=0):
+    def call(self, model, messages, *, max_tokens, temperature=None, timeout=0,
+             params=None):
         if FakeProvider.on_call:
             FakeProvider.on_call(model)
         time.sleep(FakeProvider.delays.get(model, 0))

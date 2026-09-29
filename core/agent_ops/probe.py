@@ -135,7 +135,8 @@ def probe_seat(provider: BaseProvider, seat: Seat, max_tokens: int,
                prompt: str = PROMPT) -> dict:
     """Send one review-shaped prompt and score the reply on findings emitted."""
     out = provider.call(seat.model, [{"role": "user", "content": prompt}],
-                        max_tokens=max_tokens, temperature=1.0, timeout=PROBE_TIMEOUT)
+                        max_tokens=max_tokens, temperature=1.0, timeout=PROBE_TIMEOUT,
+                        params=seat.params)
     row = {"seat": seat.name, "model": seat.model, "family": seat.family,
            "provider": seat.provider, "seconds": out.seconds,
            "content_chars": len(out.content), "reasoning_chars": len(out.reasoning),

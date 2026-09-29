@@ -179,6 +179,7 @@ def test_a_clean_review_carries_no_severity(tmp_path):
 
     class S:
         name, family, provider, model = "s", "fam", "p", "m"
+        params: dict = {}
 
     r = run_seat(OneSeatProvider(), S(), "prompt", tmp_path, timeout=5, max_tokens=10)
     assert r["status"] == "ok" and r["findings"] == 0

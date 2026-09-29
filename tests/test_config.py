@@ -198,3 +198,60 @@ def test_explicit_config_keys_still_beat_agent_ops_home(tmp_path, monkeypatch):
     c = load_config(str(cfg))
     assert c.outroot == tmp_path / "explicit", c.outroot
     assert c.state_dir == tmp_path / "scratch" / "state", "state_dir had no override"
+
+
+# --- per-seat params -------------------------------------------------------------------------
+
+def _params_toml(tmp_path, params_line):
+    p = tmp_path / "panel.toml"
+    p.write_text(f"""
+[[seats]]
+name = "s"
+family = "f"
+provider = "p"
+model = "m"
+{params_line}
+
+[providers.p]
+type = "openrouter"
+base_url = "http://x/v1"
+""", encoding="utf-8")
+    return p
+
+
+def test_seat_params_default_empty(tmp_path):
+    assert load_config(_params_toml(tmp_path, "")).seats[0].params == {}
+
+
+def test_seat_params_inline_table_parses(tmp_path):
+    cfg = load_config(_params_toml(
+        tmp_path, 'params = { provider = { only = ["Venice"] } }'))
+    assert cfg.seats[0].params == {"provider": {"only": ["Venice"]}}
+
+
+def test_seat_params_subtable_form_parses(tmp_path):
+    cfg = load_config(_params_toml(
+        tmp_path, '[seats.params.provider]\nonly = ["Venice"]\nallow_fallbacks = false'))
+    assert cfg.seats[0].params == {"provider": {"only": ["Venice"],
+                                                "allow_fallbacks": False}}
+
+
+@pytest.mark.parametrize("line", ['params = "provider=Venice"', 'params = ["Venice"]',
+                                  "params = 3"])
+def test_seat_params_must_be_a_table(tmp_path, line):
+    with pytest.raises(ConfigError, match="'params' must be a table"):
+        load_config(_params_toml(tmp_path, line))
+
+
+@pytest.mark.parametrize("key", ["model", "messages", "max_tokens",
+                                 "max_completion_tokens", "stream"])
+def test_seat_params_cannot_set_client_owned_fields(tmp_path, key):
+    """A params line that tried to swap the model or lift the output budget must fail at
+    load with the key named — not be silently dropped, not silently win."""
+    with pytest.raises(ConfigError, match=key):
+        load_config(_params_toml(tmp_path, f'params = {{ {key} = "x" }}'))
+
+
+def test_seat_params_refuse_non_json_values(tmp_path):
+    with pytest.raises(ConfigError, match=r"params\.provider\.since"):
+        load_config(_params_toml(tmp_path, "params = { provider = { since = 2026-09-29 } }"))
