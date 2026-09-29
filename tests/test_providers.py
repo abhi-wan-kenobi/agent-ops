@@ -308,3 +308,69 @@ def test_config_headers_can_override_openrouter_attribution(server):
     p.call("m", MSGS, max_tokens=10)
     _, headers, _ = server.requests[0]
     assert headers.get("X-Title") == "my-org-reviews"
+
+
+# --- per-seat params (body fields) -----------------------------------------------------------
+
+def test_seat_params_are_merged_into_the_wire_body(server):
+    """The OpenRouter route pin must reach the actual JSON the endpoint receives."""
+    server.responses = [(200, _ok_body("ok"))]
+    _provider(server, type_="openrouter").call(
+        "m1", MSGS, max_tokens=100, params={"provider": {"only": ["Venice"]}})
+    _, _, body = server.requests[0]
+    assert body == {"model": "m1", "messages": MSGS, "max_tokens": 100,
+                    "provider": {"only": ["Venice"]}}
+
+
+def test_seat_params_cannot_override_client_owned_fields(server, monkeypatch):
+    """Belt to load_config's braces: even a params dict that skipped validation cannot
+    change the model, messages or budget, cannot turn on streaming, and never reaches
+    the headers."""
+    monkeypatch.setenv("THE_KEY", "real-key")
+    server.responses = [(200, _ok_body("ok"))]
+    forged = {"model": "evil", "messages": [], "max_tokens": 999999,
+              "max_completion_tokens": 999999, "stream": True,
+              "Authorization": "Bearer forged", "headers": {"Authorization": "Bearer forged"},
+              "provider": {"only": ["Venice"]}}
+    _provider(server, key_env="THE_KEY").call("m1", MSGS, max_tokens=100, params=forged)
+    _, headers, body = server.requests[0]
+    assert body["model"] == "m1"
+    assert body["messages"] == MSGS
+    assert body["max_tokens"] == 100
+    assert "max_completion_tokens" not in body and "stream" not in body
+    assert body["provider"] == {"only": ["Venice"]}
+    assert headers.get("Authorization") == "Bearer real-key"
+
+
+def test_explicit_temperature_beats_seat_params(server):
+    """probe runs every seat at temperature=1.0; a seat's params must not skew its score."""
+    server.responses = [(200, _ok_body("ok"))]
+    _provider(server).call("m1", MSGS, max_tokens=10, temperature=1.0,
+                           params={"temperature": 0.0})
+    assert server.requests[0][2]["temperature"] == 1.0
+
+
+def test_seat_params_from_config_reach_the_wire(server, tmp_path):
+    """End to end: panel.toml -> Seat.params -> run_seat -> HTTP body."""
+    from agent_ops.config import load_config
+    from agent_ops.main import run_seat
+    cfg_path = tmp_path / "panel.toml"
+    cfg_path.write_text(f"""
+[[seats]]
+name = "s"
+family = "f"
+provider = "p"
+model = "m1"
+params = {{ provider = {{ only = ["Venice"] }} }}
+
+[providers.p]
+type = "openrouter"
+base_url = "{server.base_url}"
+""", encoding="utf-8")
+    cfg = load_config(cfg_path)
+    server.responses = [(200, _ok_body("AUDIT COMPLETE - 0 findings"))]
+    run_seat(make_provider(cfg.providers["p"]), cfg.seats[0], "prompt", tmp_path,
+             timeout=5, max_tokens=42)
+    _, _, body = server.requests[0]
+    assert body["provider"] == {"only": ["Venice"]}
+    assert body["model"] == "m1" and body["max_tokens"] == 42

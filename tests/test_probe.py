@@ -31,7 +31,8 @@ class StubProvider:
         self.stress_calls: list[str] = []
         self.ctx: dict[str, int] = {}
 
-    def call(self, model, messages, *, max_tokens, temperature=None, timeout=0):
+    def call(self, model, messages, *, max_tokens, temperature=None, timeout=0,
+             params=None):
         if len(messages[0]["content"]) > 5000:
             self.stress_calls.append(model)
             outs = self.stress_outputs.get(model, [])

@@ -33,6 +33,14 @@
 # two other cheap candidates gave 4/6 and 5/6 — every failure an empty body from one bad
 # upstream, which reads as a dead seat. If a seat here starts probing `fail`, suspect the
 # route before the model.
+#
+# To pin a seat to one upstream route, give it `params`: a table of extra fields merged
+# into that seat's chat request body. For OpenRouter, provider routing looks like this
+# (see openrouter.ai/docs for the fields it accepts). model, messages, max_tokens,
+# max_completion_tokens and stream are refused here — the seat and [agent_ops] own them —
+# and params never touch headers, so auth stays in api_key_env.
+#
+#   params = { provider = { only = ["Venice"] } }
 
 [[seats]]
 name = "seat-a"

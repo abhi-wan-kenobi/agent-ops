@@ -88,7 +88,8 @@ def claim_run_dir(root: pathlib.Path, attempts: int = 50) -> tuple[str, pathlib.
 def run_seat(provider: BaseProvider, seat: Seat, prompt: str, outdir: pathlib.Path,
              timeout: int, max_tokens: int) -> dict:
     out = provider.call(seat.model, [{"role": "user", "content": prompt}],
-                        max_tokens=max_tokens, timeout=timeout)
+                        max_tokens=max_tokens, timeout=timeout,
+                        params=seat.params)
     status, findings, reason = classify_seat(
         out.content, timed_out=(out.error == "timeout"),
         failed=bool(out.error and out.error != "timeout"), reason=out.error or "")
