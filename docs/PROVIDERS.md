@@ -43,6 +43,12 @@ A seat may leave the tag off (`model = "llama3.1"`): Ollama serves that as `:lat
 the preflight check knows it. Only `:latest` is implied — a bare name does not match another
 pulled tag, and an explicit tag never falls back.
 
+A local daemon's model listing shows only what you have pulled (`ollama pull <id>:cloud`),
+but it serves any real cloud model on demand. So a seat naming a cloud model you never
+pulled is still routable: when the listing misses, the preflight asks the daemon's
+`/api/show`, which answers for a real id and 404s for one that does not exist. You do not
+need to pull a cloud model to use it as a seat.
+
 The hosted API bills usage against your plan's credits, and running several panels at once
 queues on your plan's concurrency limit. Keep `lease_slots = 1` until you have measured
 otherwise.
@@ -93,6 +99,7 @@ error text, and the preflight listing. You override the dialect hooks:
 | `_headers()` | JSON headers plus `Authorization: Bearer <key>` | authenticate another way |
 | `list_models()` | `GET {base_url}/models` | return `None` when there is no listing |
 | `lists_model(model, listed)` | exact id match | match ids the way the listing spells them |
+| `confirm_unlisted(model)` | `False` (the listing is authoritative) | vouch for a model the listing misses, with a cheap targeted probe — never a chat call |
 
 `parse_response` returns a dict of `content`, `reasoning` and `finish_reason` — or
 `{"error": "..."}` when the body reports a failure. A body of the wrong shape can simply

@@ -137,6 +137,14 @@ class BaseProvider:
         overrides it."""
         return model in listed
 
+    def confirm_unlisted(self, model: str, timeout: float = 15.0) -> bool:
+        """Called only for a seat `lists_model` rejected: can the provider positively say
+        it serves this model anyway? True keeps the seat, False (the default) drops it as
+        NOT ROUTABLE. A listing is authoritative unless the provider knows better; one
+        that lists only part of what it serves overrides this with a cheap targeted
+        probe — never a chat call, which would spend the seat's budget."""
+        return False
+
     # -- API ---------------------------------------------------------------------------
 
     def call(self, model: str, messages: list[dict], *, max_tokens: int,
@@ -257,6 +265,23 @@ class OllamaProvider(OpenAICompatProvider):
     def lists_model(self, model: str, listed: set[str]) -> bool:
         return super().lists_model(model, listed) or (
             ":" not in model and f"{model}:latest" in listed)
+
+    def confirm_unlisted(self, model: str, timeout: float = 15.0) -> bool:
+        """A local daemon's /v1/models lists only what was `ollama pull`ed, but it serves
+        any real cloud model on demand — measured 2026-09-30 on 0.31.2: `glm-5.3-flash:cloud`
+        and `deepseek-v4.1-flash:cloud` unlisted, both answered a chat call. Trusting the
+        listing alone reported them NOT ROUTABLE. `/api/show` is the discriminator: 200 for
+        a real cloud id, 404 for an unpulled local model or an id that does not exist. Any
+        failure to ask counts as unconfirmed — the pre-existing NOT ROUTABLE verdict."""
+        root = self.cfg.base_url.removesuffix("/v1")
+        req = urllib.request.Request(
+            f"{root}/api/show", data=json.dumps({"model": model}).encode("utf-8"),
+            headers=self._headers(), method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as f:
+                return f.status == 200
+        except Exception:                                     # noqa: BLE001 — best effort
+            return False
 
 
 class OpenRouterProvider(OpenAICompatProvider):

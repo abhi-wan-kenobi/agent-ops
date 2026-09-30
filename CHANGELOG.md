@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.4.0 — 2026-09-30
 
 Theme: **Ollama as a first-class provider, and providers you can add yourself.**
 
@@ -28,6 +28,14 @@ Theme: **Ollama as a first-class provider, and providers you can add yourself.**
   only as `nomic-embed-text:latest`, served fine, refused by the panel. Only `:latest` is
   implied — a bare name does not match another pulled tag, and an explicit tag never falls
   back.
+- **Cloud models on a local Ollama daemon were reported NOT ROUTABLE.** The daemon's
+  `/v1/models` lists only models you have `ollama pull`ed, but it serves every real cloud
+  model on demand. On daemon 0.31.2 `glm-5.3-flash:cloud` and `deepseek-v4.1-flash:cloud`
+  were unlisted, answered chat calls, and were dropped at preflight — a panel of only those
+  two ended "NO ROUTABLE SEAT". A listing miss is now confirmed with the provider's own
+  targeted probe (`confirm_unlisted`; Ollama asks `/api/show`, 200 for a real id, 404 for
+  one that does not exist) before the seat is dropped. Never a chat call, and a fake id is
+  still dropped. Custom providers get the same hook.
 - **A 200 whose JSON body was not an object crashed the panel.** The error-envelope check
   ran outside the shape guard, so `[]` raised out of `call()` and took every seat down with
   it. It is now a seat error like any other malformed reply, and the guard also covers

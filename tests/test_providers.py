@@ -602,3 +602,33 @@ base_url = "{server.base_url}"
     _, _, body = server.requests[0]
     assert body["provider"] == {"only": ["Venice"]}
     assert body["model"] == "m1" and body["max_tokens"] == 42
+
+
+# ── confirm_unlisted: providers that list only part of what they serve ─────────────────
+
+@pytest.mark.parametrize("status,expected", [(200, True), (404, False), (500, False)])
+def test_ollama_confirms_an_unlisted_model_by_asking_api_show(server, status, expected):
+    """A local daemon lists only what was `ollama pull`ed but serves every cloud model on
+    demand (glm-5.3-flash:cloud, unlisted, answered a chat call on daemon 0.31.2). /api/show
+    is 200 for those and 404 for an id that does not exist; anything else is unconfirmed."""
+    server.responses = [(status, b'{"details": {}}' if status == 200 else b'{"error": "no"}')]
+    assert _provider(server, type_="ollama").confirm_unlisted("glm-5.3-flash:cloud") is expected
+    path, _, body = server.requests[0]
+    assert path == "/api/show", "the probe lives at the API root, not under /v1"
+    assert body == {"model": "glm-5.3-flash:cloud"}
+
+
+def test_ollama_confirm_carries_the_key_and_an_unreachable_daemon_is_unconfirmed(
+        server, monkeypatch):
+    monkeypatch.setenv("TEST_OLLAMA_KEY", "hosted-key")
+    server.responses = [(200, b"{}")]
+    assert _provider(server, type_="ollama", key_env="TEST_OLLAMA_KEY").confirm_unlisted("m")
+    assert server.requests[0][1]["Authorization"] == "Bearer hosted-key"
+    dead = make_provider(ProviderConfig(name="o", type="ollama", base_url="http://127.0.0.1:1/v1"))
+    assert dead.confirm_unlisted("m", timeout=0.2) is False
+
+
+def test_a_listing_is_authoritative_unless_a_provider_overrides_confirm_unlisted(server):
+    for type_ in ("openai-compatible", "openrouter"):
+        assert _provider(server, type_=type_).confirm_unlisted("anything") is False
+    assert server.requests == [], "the default must never touch the network"
