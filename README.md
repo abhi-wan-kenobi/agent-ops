@@ -42,8 +42,10 @@ the residue. `docs/PLAYBOOK.md` is the written form; start there.
 ## Requirements
 
 - Python ≥ 3.11 (stdlib only — no packages to install)
-- An [OpenRouter](https://openrouter.ai) API key **or** a local
-  [Ollama](https://ollama.com) — or any OpenAI-compatible endpoint
+- An [OpenRouter](https://openrouter.ai) API key, a local
+  [Ollama](https://ollama.com) or an Ollama API key, or any OpenAI-compatible endpoint —
+  and your own provider class if it speaks something else
+  ([docs/PROVIDERS.md](docs/PROVIDERS.md))
 
 ## Install
 
@@ -57,7 +59,7 @@ In Claude Code:
 Then configure a panel (once) — `/panel-setup` walks you through it, or directly:
 
 ```bash
-PYTHONPATH=<plugin>/core python3 -m agent_ops init       # or: init --ollama for the keyless path
+PYTHONPATH=<plugin>/core python3 -m agent_ops init       # or: init --ollama (keyless) / init --ollama-cloud
 export OPENROUTER_API_KEY=sk-or-...                      # init prints this line too
 ```
 

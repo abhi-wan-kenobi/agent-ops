@@ -42,6 +42,9 @@ class FakeProvider:
     def model_ids(self, timeout=15.0):
         return FakeProvider.listed
 
+    def lists_model(self, model, listed):
+        return model in listed
+
     def context_lengths(self, timeout=15.0):
         return {}
 
@@ -217,6 +220,61 @@ def test_unreachable_listing_endpoint_does_not_block(env, fake_provider):
     repo, cfg, _ = env
     fake_provider.listed = None                 # could not ask
     assert main(_argv(repo, cfg)) == 0
+
+
+@pytest.mark.parametrize("ptype,rc,marker", [
+    ("ollama", 0, None),
+    ("openai-compatible", 2, "NO ROUTABLE SEAT"),
+])
+def test_bare_model_names_are_routable_on_ollama_and_only_there(env, monkeypatch, capsys,
+                                                                 ptype, rc, marker):
+    """Through main() with the REAL provider layer: Ollama lists `model-a:latest` and
+    serves the bare `model-a`. The shipped `init --ollama` panel is written with bare
+    names, so before this the whole panel was rejected as NOT ROUTABLE. The control row
+    pins that the tolerance is Ollama's alone."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from agent_ops.providers import make_provider as real_make_provider
+
+    class Daemon(BaseHTTPRequestHandler):
+        def _send(self, obj):
+            body = json.dumps(obj).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):
+            self._send({"data": [{"id": "model-a:latest"}, {"id": "model-b:latest"}]})
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            self._send({"choices": [{"message": {"content": GOOD_REPORT},
+                                     "finish_reason": "stop"}]})
+
+        def log_message(self, *a):
+            pass
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), Daemon)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        repo, cfg, _ = env
+        cfg.write_text(cfg.read_text()
+                       .replace('type = "openai-compatible"', f'type = "{ptype}"')
+                       .replace("http://unused.invalid/v1",
+                                f"http://127.0.0.1:{httpd.server_address[1]}/v1"),
+                       encoding="utf-8")
+        monkeypatch.setattr(main_mod, "make_provider", real_make_provider)
+        got = main(_argv(repo, cfg))
+    finally:
+        httpd.shutdown()
+    err = capsys.readouterr().err
+    assert got == rc, err
+    if marker:
+        assert marker in err
+    else:
+        assert "NOT ROUTABLE" not in err
 
 
 def test_models_override_is_explicit_in_the_output(env, capsys):

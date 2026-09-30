@@ -5,25 +5,32 @@ This replaces the machine-welded transport of the original panel (a local gatewa
 style choice: the plugin must work from any host, with nothing but an endpoint and an API
 key the user owns.
 
-The registry is keyed by the provider `type` in panel.toml. Both shipped types speak the
-same OpenAI-compatible dialect today; a future hosted/metered provider is one new subclass
-and one registry entry, no restructuring.
+The registry is keyed by the provider `type` in panel.toml. The shipped types
+(openrouter, ollama, openai-compatible) all speak the OpenAI chat-completions dialect.
+Anything else is one subclass of BaseProvider: a `type` of the form `module:ClassName`
+loads it, so a provider is a file the user owns rather than a fork of this package
+(docs/PROVIDERS.md).
 """
 from __future__ import annotations
 
 import dataclasses
+import importlib
 import json
 import os
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
 
 from . import __version__
 from .classify import SECRET_RE
-from .config import ConfigError, ProviderConfig
+from .config import ConfigError, ProviderConfig, home
 
 USER_AGENT = f"agent-ops/{__version__}"
+
+# Drop-in home for custom provider modules, under AGENT_OPS_HOME (see _load_custom_class).
+CUSTOM_PROVIDER_DIR = "providers"
 
 # Transient failures are retried with exponential backoff; a hard client error is not.
 # 429 gets a single retry: one backoff is polite, hammering a rate limit is not.
@@ -44,6 +51,15 @@ class SeatOutput:
 
 
 class BaseProvider:
+    """OpenAI chat-completions transport: auth, retries, timeouts, response triage.
+
+    A provider that speaks another dialect overrides only the four dialect hooks —
+    `chat_path`, `build_body`, `parse_response`, and (when the endpoint has no
+    OpenAI-style listing) `list_models` — and inherits the retry and error handling.
+    """
+
+    chat_path = "/chat/completions"
+
     def __init__(self, cfg: ProviderConfig):
         self.cfg = cfg
         self.api_key: str | None = None
@@ -76,15 +92,59 @@ class BaseProvider:
         with urllib.request.urlopen(req, timeout=timeout) as f:
             return json.loads(f.read().decode("utf-8", "replace"))
 
+    # -- dialect hooks -----------------------------------------------------------------
+
+    def build_body(self, model: str, messages: list[dict], *, max_tokens: int,
+                   temperature: float | None) -> dict:
+        """The JSON request body for one seat call. An unset temperature is omitted, not
+        defaulted: a default here would silently override the model's own."""
+        body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens}
+        if temperature is not None:
+            body["temperature"] = temperature
+        return body
+
+    def parse_response(self, data: dict) -> dict:
+        """One HTTP-200 JSON body -> SeatOutput fields: `content`, `reasoning` and
+        `finish_reason`, or `error=` for a provider-side failure the body reports.
+
+        Indexing or attribute errors on a body of the wrong shape (KeyError, IndexError,
+        AttributeError, TypeError, ValueError) need no handling here: call() turns them
+        into a 'malformed response shape' seat error rather than crashing the panel."""
+        # An OpenAI-compatible gateway can answer 200 with an error envelope and no
+        # choices at all — OpenRouter does exactly this when the upstream provider it
+        # routed to fails. Measured 2026-09-08: 2 of 6 identical probe calls to
+        # z-ai/glm-5.3-flash came back that way. Falling through to `{}` here turned
+        # the provider's own explanation into "empty content", which reads as a dead
+        # seat and sends the operator hunting the model instead of the route. Silent
+        # absence, in the tool whose first playbook rule is about silent absence.
+        if not data.get("choices") and data.get("error") is not None:
+            err = data["error"]
+            detail = err.get("message") if isinstance(err, dict) else str(err)
+            detail = SECRET_RE.sub("[REDACTED]", str(detail or "").strip())[:200]
+            return {"error": f"provider error: {detail}" if detail
+                    else "provider error (no message)"}
+        ch = (data.get("choices") or [{}])[0]
+        msg = ch.get("message") or {}
+        return {
+            "content": str(msg.get("content") or ""),
+            "reasoning": str(msg.get("reasoning_content") or msg.get("reasoning") or ""),
+            "finish_reason": str(ch.get("finish_reason") or ""),
+        }
+
+    def lists_model(self, model: str, listed: set[str]) -> bool:
+        """Does the provider's `list_models()` id set cover this seat's model id? Exact
+        match by default; a provider whose listing spells ids differently from requests
+        overrides it."""
+        return model in listed
+
     # -- API ---------------------------------------------------------------------------
 
     def call(self, model: str, messages: list[dict], *, max_tokens: int,
              temperature: float | None = None, timeout: float = 900.0) -> SeatOutput:
         """One chat completion. Never raises for transport problems — the panel must keep
         running its other seats — so every failure lands in SeatOutput.error instead."""
-        body: dict = {"model": model, "messages": messages, "max_tokens": max_tokens}
-        if temperature is not None:
-            body["temperature"] = temperature
+        body = self.build_body(model, messages, max_tokens=max_tokens,
+                               temperature=temperature)
 
         started = time.monotonic()
 
@@ -96,7 +156,7 @@ class BaseProvider:
         while True:
             attempt += 1
             try:
-                data = self._post("/chat/completions", body, timeout)
+                data = self._post(self.chat_path, body, timeout)
             except urllib.error.HTTPError as e:
                 reason = _http_reason(e)
                 if e.code == 429 and attempt < RETRY_429_ATTEMPTS:
@@ -124,28 +184,9 @@ class BaseProvider:
                     continue
                 return out(error=f"transport error: {type(e).__name__}")
 
-            # An OpenAI-compatible gateway can answer 200 with an error envelope and no
-            # choices at all — OpenRouter does exactly this when the upstream provider it
-            # routed to fails. Measured 2026-09-08: 2 of 6 identical probe calls to
-            # z-ai/glm-5.3-flash came back that way. Falling through to `{}` here turned
-            # the provider's own explanation into "empty content", which reads as a dead
-            # seat and sends the operator hunting the model instead of the route. Silent
-            # absence, in the tool whose first playbook rule is about silent absence.
-            if not data.get("choices") and data.get("error") is not None:
-                err = data["error"]
-                detail = err.get("message") if isinstance(err, dict) else str(err)
-                detail = SECRET_RE.sub("[REDACTED]", str(detail or "").strip())[:200]
-                return out(error=f"provider error: {detail}" if detail
-                           else "provider error (no message)")
             try:
-                ch = (data.get("choices") or [{}])[0]
-                msg = ch.get("message") or {}
-                return out(
-                    content=str(msg.get("content") or ""),
-                    reasoning=str(msg.get("reasoning_content") or msg.get("reasoning") or ""),
-                    finish_reason=str(ch.get("finish_reason") or ""),
-                )
-            except (AttributeError, IndexError, TypeError) as e:
+                return out(**self.parse_response(data))
+            except (AttributeError, IndexError, KeyError, TypeError, ValueError) as e:
                 return out(error=f"malformed response shape: {type(e).__name__}")
 
     def list_models(self, timeout: float = 15.0) -> list[dict] | None:
@@ -196,6 +237,19 @@ class OpenAICompatProvider(BaseProvider):
     so does anything else that clones it."""
 
 
+class OllamaProvider(OpenAICompatProvider):
+    """Ollama — the local daemon or the hosted API (https://ollama.com/v1 with a key).
+
+    Same dialect; different model naming. Its listing spells every tag out
+    (`llama3.1:latest`) while a request may leave the tag off and be served `:latest`.
+    Without knowing that, preflight reports a model Ollama would happily serve as NOT
+    ROUTABLE — which is what the bare-name starter panel from `init --ollama` hit."""
+
+    def lists_model(self, model: str, listed: set[str]) -> bool:
+        return super().lists_model(model, listed) or (
+            ":" not in model and f"{model}:latest" in listed)
+
+
 class OpenRouterProvider(OpenAICompatProvider):
     """Same dialect; adds OpenRouter's optional attribution headers."""
 
@@ -207,18 +261,67 @@ class OpenRouterProvider(OpenAICompatProvider):
 
 PROVIDER_TYPES: dict[str, type[BaseProvider]] = {
     "openrouter": OpenRouterProvider,
-    "ollama": OpenAICompatProvider,
+    "ollama": OllamaProvider,
     "openai-compatible": OpenAICompatProvider,
 }
 
 
+def _load_custom_class(cfg: ProviderConfig) -> type[BaseProvider]:
+    """Resolve `type = "module:ClassName"` to a BaseProvider subclass.
+
+    Modules are found on PYTHONPATH and in `<AGENT_OPS_HOME>/providers/`, a directory the
+    user owns — appended, never prepended, so a file dropped there cannot shadow the
+    standard library or this package. Every failure is a ConfigError naming the fix: it
+    happens before any seat runs, where a traceback would read as a broken tool."""
+    where = f"provider {cfg.name!r} (type {cfg.type!r})"
+    module_name, _, attr = cfg.type.partition(":")
+    # Every dotted part must be an identifier: a leading dot is a relative import that
+    # needs a package (an unreadable TypeError), and a slash is a file path pretending to
+    # be a module. Neither can escape the import system, but both deserve the shape hint.
+    if (not all(part.isidentifier() for part in module_name.split("."))
+            or not attr.isidentifier()):
+        raise ConfigError(f"{where}: a custom type is 'module:ClassName', "
+                          f"e.g. 'my_provider:MyProvider'")
+    drop_in = home() / CUSTOM_PROVIDER_DIR
+    if drop_in.is_dir() and str(drop_in) not in sys.path:
+        sys.path.append(str(drop_in))
+    try:
+        module = importlib.import_module(module_name)
+    except ModuleNotFoundError as e:
+        # Only "your module is missing" when the missing module IS the requested one; a
+        # provider that imports something absent must say what, not blame its own path.
+        if e.name and (module_name == e.name or module_name.startswith(e.name + ".")):
+            raise ConfigError(f"{where}: no module {module_name!r} — put "
+                              f"{module_name.split('.')[0]}.py in {drop_in} or on "
+                              f"PYTHONPATH") from e
+        raise ConfigError(f"{where}: importing {module_name!r} failed: {e}") from e
+    except Exception as e:                       # noqa: BLE001 — user code ran at import
+        raise ConfigError(f"{where}: importing {module_name!r} failed: "
+                          f"{type(e).__name__}: {e}") from e
+    cls = getattr(module, attr, None)
+    if not (isinstance(cls, type) and issubclass(cls, BaseProvider)):
+        raise ConfigError(f"{where}: {module_name}.{attr} must be a class deriving from "
+                          f"agent_ops.providers.BaseProvider")
+    return cls
+
+
 def make_provider(cfg: ProviderConfig) -> BaseProvider:
     cls = PROVIDER_TYPES.get(cfg.type)
-    if cls is None:
+    if cls is not None:
+        return cls(cfg)
+    if ":" not in cfg.type:
         raise ConfigError(
             f"provider {cfg.name!r} has unknown type {cfg.type!r} — "
-            f"known types: {', '.join(sorted(PROVIDER_TYPES))}")
-    return cls(cfg)
+            f"known types: {', '.join(sorted(PROVIDER_TYPES))}, or 'module:ClassName' "
+            f"for a custom provider (see docs/PROVIDERS.md)")
+    custom = _load_custom_class(cfg)
+    try:
+        return custom(cfg)
+    except ConfigError:
+        raise
+    except Exception as e:                       # noqa: BLE001 — user code in __init__
+        raise ConfigError(f"provider {cfg.name!r} (type {cfg.type!r}) failed to "
+                          f"initialise: {type(e).__name__}: {e}") from e
 
 
 def _http_reason(e: urllib.error.HTTPError) -> str:

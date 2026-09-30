@@ -36,7 +36,7 @@ Setup lives in `~/.agent-ops/panel.toml` — `agent_ops init` writes a starter (
 missing the run says so and exits — nothing to diagnose. Related commands:
 
 ```bash
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init [--ollama]  # write a starter panel.toml
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init [--ollama|--ollama-cloud]  # write a starter panel.toml
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops probe          # score & rank the configured seats
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs list     # inspect / cancel runs
 PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs cancel <run-id>

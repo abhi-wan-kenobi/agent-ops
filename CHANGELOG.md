@@ -1,5 +1,43 @@
 # Changelog
 
+## Unreleased
+
+Theme: **Ollama as a first-class provider, and providers you can add yourself.**
+
+### Added
+
+- **Custom providers.** `type = "module:ClassName"` loads a `BaseProvider` subclass from
+  `~/.agent-ops/providers/` (or anywhere on `PYTHONPATH`), so an endpoint with another
+  path, auth header or request/response shape is one small file instead of a fork.
+  `BaseProvider` exposes the dialect as hooks — `chat_path`, `build_body`,
+  `parse_response`, `lists_model` — and keeps the retries, timeouts, secret redaction and
+  error triage. Every load failure is a config error before any seat runs. The drop-in
+  directory is appended to the import path, never prepended, so it cannot shadow the
+  standard library. Guide and a complete worked example: `docs/PROVIDERS.md`.
+- **`init --ollama-cloud`.** A starter panel for Ollama's hosted API: one `OLLAMA_API_KEY`,
+  no daemon. The `ollama` type already accepted a key; nothing wrote or documented that
+  path, and hosted ids differ from the local daemon's (`gpt-oss:120b`, not
+  `gpt-oss:120b-cloud`).
+
+### Fixed
+
+- **Bare Ollama model names were reported NOT ROUTABLE.** Ollama's `/v1/models` lists every
+  tag spelled out (`llama3.1:latest`) and serves a bare `llama3.1` as `:latest`, but the
+  preflight compared ids exactly. `init --ollama` writes bare names, so its own starter
+  panel was rejected whole. Reproduced against a live daemon: `nomic-embed-text` listed
+  only as `nomic-embed-text:latest`, served fine, refused by the panel. Only `:latest` is
+  implied — a bare name does not match another pulled tag, and an explicit tag never falls
+  back.
+- **A 200 whose JSON body was not an object crashed the panel.** The error-envelope check
+  ran outside the shape guard, so `[]` raised out of `call()` and took every seat down with
+  it. It is now a seat error like any other malformed reply, and the guard also covers
+  `KeyError` and `ValueError`, which is what indexing a wrong-shaped body raises.
+
+### Changed
+
+- The `ollama` type is its own class (an `OpenAICompatProvider` with Ollama's model
+  naming) instead of an alias of the generic one. Requests on the wire are unchanged.
+
 ## v0.3.1 — 2026-09-09
 
 Theme: **everything a stranger's first run hits.** Every item here was found by reinstalling

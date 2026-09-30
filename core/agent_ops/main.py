@@ -485,7 +485,8 @@ def audit(argv: list[str]) -> int:
     # must not block — GET /models being down does not mean POST /chat/completions is.
     known: dict[str, set[str] | None] = {name: p.model_ids() for name, p in providers.items()}
     unroutable = [s for s in panel
-                  if known[s.provider] is not None and s.model not in known[s.provider]]
+                  if known[s.provider] is not None
+                  and not providers[s.provider].lists_model(s.model, known[s.provider])]
     for s in unroutable:
         print(f">> {s.name:14} ⛔ NOT ROUTABLE — provider {s.provider!r} does not list "
               f"model {s.model!r}. Fix the model id in panel.toml or pick another seat.",

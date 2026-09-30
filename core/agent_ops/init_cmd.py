@@ -108,6 +108,47 @@ base_url = "http://localhost:11434/v1"
 # api_key_env = "OPENROUTER_API_KEY"
 """
 
+# Ollama's hosted API: a key instead of a local daemon. Ids below were listed by
+# https://ollama.com/v1/models on 2026-09-30 — that listing is public and spells ids
+# differently from the local daemon (`gpt-oss:120b` here, `gpt-oss:120b-cloud` there).
+OLLAMA_CLOUD_TOML = """\
+# agent-ops panel — written by `agent_ops init --ollama-cloud`. Edit freely; this file is yours.
+#
+# Seats run on Ollama's hosted API with your own key. Keep them in DIFFERENT model
+# families: the panel mechanically excludes the family that wrote the code (--coder), and
+# with one family that exclusion would leave nothing. Ids drift: `curl
+# https://ollama.com/v1/models` lists what is addressable today (no key needed to look).
+# Run `agent_ops probe` after editing: it scores every seat on a known-defect diff and
+# ranks the usable ones.
+
+[[seats]]
+name = "seat-a"
+family = "mistral"
+provider = "ollama-cloud"
+model = "mistral-large-3:675b"
+
+[[seats]]
+name = "seat-b"
+family = "gpt"
+provider = "ollama-cloud"
+model = "gpt-oss:120b"
+
+[[seats]]
+name = "seat-c"
+family = "minimax"
+provider = "ollama-cloud"
+model = "minimax-m2.7"
+
+[providers.ollama-cloud]
+type = "ollama"
+base_url = "https://ollama.com/v1"
+api_key_env = "OLLAMA_API_KEY"
+
+# Already signed in to Ollama on this machine? A local daemon can serve the same cloud
+# models with no key: point a provider at http://localhost:11434/v1 and suffix the ids
+# with `:cloud` (see `ollama list`).
+"""
+
 
 def run_init(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
@@ -118,6 +159,8 @@ def run_init(argv: list[str]) -> int:
                         help="OpenRouter starter panel (default): one key, three families")
     flavor.add_argument("--ollama", action="store_true",
                         help="local-Ollama starter panel: no key at all")
+    flavor.add_argument("--ollama-cloud", dest="ollama_cloud", action="store_true",
+                        help="Ollama hosted-API starter panel: one OLLAMA_API_KEY")
     # default_config_path(), not the DEFAULT_CONFIG_PATH literal: the literal is frozen at
     # import time and does not follow AGENT_OPS_HOME, so `init` wrote to ~/.agent-ops while
     # every other subcommand read the scratch home. Found in the v0.3.0 clean-profile
@@ -127,7 +170,8 @@ def run_init(argv: list[str]) -> int:
     a = ap.parse_args(argv)
 
     target = pathlib.Path(a.config).expanduser() if a.config else default_target
-    text = OLLAMA_TOML if a.ollama else OPENROUTER_TOML
+    text = (OLLAMA_CLOUD_TOML if a.ollama_cloud
+            else OLLAMA_TOML if a.ollama else OPENROUTER_TOML)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         # Exclusive create, not check-then-write: two concurrent inits racing past an
@@ -159,7 +203,13 @@ def run_init(argv: list[str]) -> int:
     cfg_flag = f" --config {target}" if a.config else ""
     print(f"wrote {target}")
     print()
-    if a.ollama:
+    if a.ollama_cloud:
+        print("Next steps:")
+        print("  1. export OLLAMA_API_KEY=...                 # ollama.com/settings/keys")
+        print(f"  2. python3 -m agent_ops probe{cfg_flag}     # score & rank the seats")
+        print(f"  3. python3 -m agent_ops <repo> --coder <model that wrote the code>"
+              f"{cfg_flag}")
+    elif a.ollama:
         print("Next steps (no API key needed — seats run on your local Ollama daemon):")
         print(f"  1. edit {target} so the models match `ollama list`")
         print(f"  2. python3 -m agent_ops probe{cfg_flag}     # score & rank the seats")

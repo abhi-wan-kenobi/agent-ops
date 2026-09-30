@@ -257,10 +257,6 @@ def test_seat_output_defaults():
     assert (o.content, o.error) == ("", None)
 
 
-def test_generic_and_ollama_types_are_the_same_implementation(server):
-    assert type(_provider(server, type_="ollama")) is OpenAICompatProvider
-
-
 def test_inbound_error_text_is_secret_redacted(server):
     """Dogfood finding E, 2026-09-01: outbound payloads are secret-gated but error bodies
     coming BACK were written to reports and stderr verbatim — an endpoint echoing request
@@ -308,3 +304,218 @@ def test_config_headers_can_override_openrouter_attribution(server):
     p.call("m", MSGS, max_tokens=10)
     _, headers, _ = server.requests[0]
     assert headers.get("X-Title") == "my-org-reviews"
+
+
+# ── Ollama ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("model,listed,expected", [
+    # Ollama lists every tag spelled out but serves a bare name as :latest — measured
+    # against a live daemon 2026-09-30 (embeddings on `nomic-embed-text` -> 200 while
+    # /v1/models lists only `nomic-embed-text:latest`). The starter panel from
+    # `init --ollama` uses bare names, so an exact-match preflight rejected all of them.
+    ("llama3.1", {"llama3.1:latest"}, True),
+    ("llama3.1:latest", {"llama3.1:latest"}, True),
+    ("llama3.1:8b", {"llama3.1:8b"}, True),
+    # Only :latest is implied. A bare name must not match some other pulled tag, and an
+    # explicit tag must not fall back to :latest — that would report a model Ollama
+    # would answer with a 404 as routable.
+    ("llama3.1", {"llama3.1:8b"}, False),
+    ("llama3.1:70b", {"llama3.1:latest"}, False),
+    ("llama3.1", set(), False),
+])
+def test_ollama_preflight_understands_the_implicit_latest_tag(model, listed, expected):
+    p = make_provider(ProviderConfig(name="o", type="ollama", base_url="http://127.0.0.1:1/v1"))
+    assert p.lists_model(model, listed) is expected
+
+
+def test_other_providers_still_require_an_exact_id():
+    p = make_provider(ProviderConfig(name="g", type="openai-compatible",
+                                     base_url="http://127.0.0.1:1/v1"))
+    assert p.lists_model("llama3.1", {"llama3.1:latest"}) is False
+
+
+def test_ollama_hosted_api_authenticates_with_the_key_from_env(server, monkeypatch):
+    """The hosted API is the same provider type as the local daemon plus a key."""
+    monkeypatch.setenv("TEST_OLLAMA_KEY", "hosted-key-value")
+    server.responses = [(200, _ok_body("ok"))]
+    _provider(server, key_env="TEST_OLLAMA_KEY", type_="ollama").call("m", MSGS, max_tokens=5)
+    path, headers, _ = server.requests[0]
+    assert path == "/v1/chat/completions"
+    assert headers["Authorization"] == "Bearer hosted-key-value"
+
+
+# ── response triage ────────────────────────────────────────────────────────────────────
+
+def test_a_non_object_json_body_is_a_seat_error_not_a_crash(server):
+    """A 200 whose JSON is not an object used to raise out of call() — the error-envelope
+    check ran outside the shape guard — taking the whole panel down with one seat."""
+    server.responses = [(200, b"[]")]
+    out = _provider(server).call("m", MSGS, max_tokens=10)
+    assert out.error is not None and out.error.startswith("malformed response shape")
+
+
+# ── custom providers: `type = "module:ClassName"` ──────────────────────────────────────
+
+import importlib
+import sys
+import textwrap
+
+MESSAGES_DIALECT = textwrap.dedent('''
+    from agent_ops.providers import BaseProvider
+
+    class MessagesProvider(BaseProvider):
+        """A different dialect: another path, x-api-key auth, system prompt lifted out,
+        content blocks instead of choices."""
+        chat_path = "/messages"
+
+        def _headers(self):
+            h = super()._headers()
+            h.pop("Authorization", None)
+            if self.api_key:
+                h["x-api-key"] = self.api_key
+            return h
+
+        def build_body(self, model, messages, *, max_tokens, temperature):
+            body = {"model": model, "max_tokens": max_tokens,
+                    "messages": [m for m in messages if m["role"] != "system"]}
+            system = [m["content"] for m in messages if m["role"] == "system"]
+            if system:
+                body["system"] = "\\n".join(system)
+            return body
+
+        def parse_response(self, data):
+            text = "".join(b.get("text", "") for b in data["content"] if b.get("type") == "text")
+            return {"content": text, "finish_reason": data.get("stop_reason") or ""}
+''')
+
+
+@pytest.fixture()
+def drop_in(tmp_path, monkeypatch):
+    """A scratch AGENT_OPS_HOME with an empty providers/ dir; sys.path and the module
+    cache are restored afterwards so one test's provider cannot leak into the next."""
+    monkeypatch.setenv("AGENT_OPS_HOME", str(tmp_path))
+    d = tmp_path / "providers"
+    d.mkdir()
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    before = set(sys.modules)
+    yield d
+    for name in set(sys.modules) - before:
+        sys.modules.pop(name, None)
+
+
+def _module(drop_in, name, source):
+    (drop_in / f"{name}.py").write_text(source, encoding="utf-8")
+    importlib.invalidate_caches()
+
+
+def _custom(type_, base_url="http://127.0.0.1:1/v1", **kw):
+    return make_provider(ProviderConfig(name="custom", type=type_, base_url=base_url, **kw))
+
+
+def test_a_dropped_in_provider_speaks_another_dialect_end_to_end(server, drop_in, monkeypatch):
+    monkeypatch.setenv("TEST_MESSAGES_KEY", "messages-key")
+    _module(drop_in, "mydialect", MESSAGES_DIALECT)
+    server.responses = [(200, json.dumps({"content": [{"type": "text", "text": "the report"}],
+                                          "stop_reason": "end_turn"}).encode())]
+    p = _custom("mydialect:MessagesProvider", server.base_url, api_key_env="TEST_MESSAGES_KEY")
+    out = p.call("m1", [{"role": "system", "content": "be strict"},
+                        {"role": "user", "content": "hi"}], max_tokens=50)
+    assert out.error is None
+    assert (out.content, out.finish_reason) == ("the report", "end_turn")
+    path, headers, body = server.requests[0]
+    assert path == "/v1/messages"
+    sent = {k.lower(): v for k, v in headers.items()}      # urllib title-cases on the wire
+    assert sent["x-api-key"] == "messages-key" and "authorization" not in sent
+    assert body["system"] == "be strict" and body["messages"] == [{"role": "user", "content": "hi"}]
+    assert "temperature" not in body
+
+
+def test_a_custom_provider_inherits_the_retry_and_triage_of_the_base(server, drop_in, monkeypatch):
+    _fast_retries(monkeypatch)
+    _module(drop_in, "mydialect", MESSAGES_DIALECT)
+    server.responses = [(500, b"boom"),
+                        (200, json.dumps({"content": [{"type": "text", "text": "ok"}]}).encode())]
+    out = _custom("mydialect:MessagesProvider", server.base_url).call("m", MSGS, max_tokens=5)
+    assert out.error is None and out.content == "ok"
+    assert len(server.requests) == 2
+
+
+def test_a_dialect_body_of_the_wrong_shape_is_a_seat_error_not_a_crash(server, drop_in):
+    """`data["content"]` is what every author writes first, and it raises KeyError on a
+    body without it. That must land in SeatOutput.error like any other bad reply; if it
+    escaped, one custom seat would take the whole panel down."""
+    _module(drop_in, "mydialect", MESSAGES_DIALECT)
+    server.responses = [(200, b'{"unexpected": true}')]
+    out = _custom("mydialect:MessagesProvider", server.base_url).call("m", MSGS, max_tokens=5)
+    assert out.error == "malformed response shape: KeyError"
+
+
+def test_the_drop_in_dir_is_appended_so_it_cannot_shadow_anything(drop_in):
+    _module(drop_in, "mydialect", MESSAGES_DIALECT)
+    _custom("mydialect:MessagesProvider")
+    assert sys.path[-1] == str(drop_in), "prepending would let a stray file shadow the stdlib"
+
+
+def test_a_missing_module_names_where_it_was_looked_for(drop_in):
+    with pytest.raises(ConfigError) as e:
+        _custom("no_such_provider_module:Thing")
+    msg = str(e.value)
+    assert "no module 'no_such_provider_module'" in msg and str(drop_in) in msg
+
+
+def test_a_provider_missing_its_own_dependency_is_not_blamed_on_the_path(drop_in):
+    _module(drop_in, "needs_dep", "import absent_dependency_xyz\n")
+    with pytest.raises(ConfigError) as e:
+        _custom("needs_dep:P")
+    assert "absent_dependency_xyz" in str(e.value)
+    assert "put needs_dep.py" not in str(e.value), "the module WAS found; its import failed"
+
+
+def test_an_exception_at_import_is_a_config_error_naming_the_cause(drop_in):
+    _module(drop_in, "boom_at_import", "raise RuntimeError('kaput')\n")
+    with pytest.raises(ConfigError, match="RuntimeError: kaput"):
+        _custom("boom_at_import:P")
+
+
+@pytest.mark.parametrize("source,attr", [
+    (MESSAGES_DIALECT, "Missing"),                                # no such attribute
+    ("class Plain:\n    pass\n", "Plain"),                        # not a BaseProvider
+    ("def make(cfg):\n    return None\n", "make"),                # a factory is not a class
+])
+def test_the_named_object_must_be_a_baseprovider_subclass(drop_in, source, attr):
+    _module(drop_in, "notaprovider", source)
+    with pytest.raises(ConfigError, match="must be a class deriving from"):
+        _custom(f"notaprovider:{attr}")
+
+
+@pytest.mark.parametrize("bad", ["mod:", ":Cls", "mod:a:b", "mod:1x", "mod:with space",
+                                 "../../evil:P", ".rel:P", "a..b:P", "a/b:P", "pkg.:P"])
+def test_a_malformed_custom_type_says_the_expected_shape(drop_in, bad):
+    with pytest.raises(ConfigError, match="module:ClassName"):
+        _custom(bad)
+
+
+def test_a_provider_constructor_failure_is_a_config_error_but_config_errors_pass_through(
+        drop_in, monkeypatch):
+    monkeypatch.delenv("TEST_ABSENT_KEY", raising=False)
+    _module(drop_in, "flaky", textwrap.dedent('''
+        from agent_ops.providers import BaseProvider
+        class Explodes(BaseProvider):
+            def __init__(self, cfg):
+                raise ValueError("no region configured")
+        class Fine(BaseProvider):
+            pass
+    '''))
+    with pytest.raises(ConfigError, match="failed to initialise: ValueError: no region"):
+        _custom("flaky:Explodes")
+    # The base class's own missing-key ConfigError must reach the user unchanged, not be
+    # re-wrapped as "failed to initialise".
+    with pytest.raises(ConfigError) as e:
+        _custom("flaky:Fine", api_key_env="TEST_ABSENT_KEY")
+    assert "TEST_ABSENT_KEY" in str(e.value) and "failed to initialise" not in str(e.value)
+
+
+def test_the_unknown_type_error_points_at_custom_providers():
+    with pytest.raises(ConfigError, match="module:ClassName"):
+        make_provider(ProviderConfig(name="x", type="carrier-pigeon",
+                                     base_url="http://127.0.0.1:1/v1"))
