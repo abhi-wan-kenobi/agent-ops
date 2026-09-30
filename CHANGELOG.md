@@ -1,5 +1,34 @@
 # Changelog
 
+## v0.4.1 — 2026-09-30
+
+Theme: **the plugin's commands work under omp.**
+
+### Fixed
+
+- **Every documented command failed under omp with `No module named agent_ops`.** The skill
+  and `/panel-setup` locate the plugin through `${CLAUDE_PLUGIN_ROOT}`. Claude Code
+  substitutes that inline in Markdown; omp does not, and the variable is empty in its shell,
+  so `PYTHONPATH` became `/core`. Found by installing v0.4.0 into a clean omp profile from
+  GitHub and running a real session: `omp plugin install` and skill discovery worked, then
+  the first command failed. A weak model then went hunting, and pip-installed unrelated PyPI
+  packages (`agentops`, `agent-ops-cli`) into a venv. Each command now carries a second
+  `PYTHONPATH` entry naming omp's plugin cache directory. It embeds the plugin version, and a
+  test fails if a bump leaves it stale. Python ignores a `PYTHONPATH` entry that does not
+  exist, so Claude Code is unaffected.
+- Two shapes were tried and rejected on the way, both on real Claude Code: a
+  `${CLAUDE_PLUGIN_ROOT:-…}` default is not substituted by Claude Code at all (the variable is
+  not in its Bash environment), and a `$(ls … | tail -1)` search makes its permission check
+  ask for approval on every command despite the skill's `Bash(PYTHONPATH=*)` allowance.
+
+### Notes
+
+- omp installs this plugin natively (`/marketplace add abhi-wan-kenobi/agent-ops`, then
+  `/marketplace install agent-ops@agent-ops`), but only the skill and `/panel-setup` apply
+  there. The two safety hooks in `hooks/hooks.json` are Claude Code command hooks, which omp
+  does not load, so they do not run under omp. Use omp's own `bash.patterns` deny rules for
+  destructive git commands instead.
+
 ## v0.4.0 — 2026-09-30
 
 Theme: **Ollama as a first-class provider, and providers you can add yourself.**
