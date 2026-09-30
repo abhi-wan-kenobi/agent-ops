@@ -484,10 +484,14 @@ def audit(argv: list[str]) -> int:
     # Preflight, best effort per provider: a reachable listing that lacks the model turns
     # a slow per-seat failure into one line now. An unreachable listing proves nothing and
     # must not block — GET /models being down does not mean POST /chat/completions is.
+    # A listing miss is then confirmed with the provider's own targeted probe, because some
+    # providers list only part of what they serve (a local Ollama daemon lists just the
+    # models pulled to it, yet serves every cloud model on demand).
     known: dict[str, set[str] | None] = {name: p.model_ids() for name, p in providers.items()}
     unroutable = [s for s in panel
                   if known[s.provider] is not None
-                  and not providers[s.provider].lists_model(s.model, known[s.provider])]
+                  and not providers[s.provider].lists_model(s.model, known[s.provider])
+                  and not providers[s.provider].confirm_unlisted(s.model)]
     for s in unroutable:
         print(f">> {s.name:14} ⛔ NOT ROUTABLE — provider {s.provider!r} does not list "
               f"model {s.model!r}. Fix the model id in panel.toml or pick another seat.",
