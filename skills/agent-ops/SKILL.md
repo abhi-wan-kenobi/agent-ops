@@ -8,13 +8,20 @@ allowed-tools: Read, Grep, Bash(PYTHONPATH=*)
 
 Runs 2+ independent models from **different families** over a change and reports defects.
 The family that wrote the code is excluded mechanically. The panel is a source of leads,
-not verdicts — `${CLAUDE_PLUGIN_ROOT}/docs/PLAYBOOK.md` is the full operating doctrine and
+not verdicts — the plugin's `docs/PLAYBOOK.md` is the full operating doctrine and
 is worth reading once in whole.
+
+> **Plugin location.** Every command here finds the plugin through Claude Code's
+> plugin-root variable, and for omp through its plugin cache (the second `PYTHONPATH`
+> entry). If neither applies (a project-scoped or hand-copied install) it fails with
+> `No module named agent_ops`; then add the plugin root, three directories above this
+> file, as another `PYTHONPATH` entry. There is no PyPI package to install: `agentops` is
+> an unrelated product.
 
 ## Invocation
 
 ```bash
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops <repo> \
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops <repo> \
   --coder <model that wrote the code> \
   [--scope uncommitted|last|commit:<ref>|<git-ref>] \
   [--only <path-substring>] [--split-by-file] [--seats N] [--focus "..."] \
@@ -36,12 +43,12 @@ Setup lives in `~/.agent-ops/panel.toml` — `agent_ops init` writes a starter (
 missing the run says so and exits — nothing to diagnose. Related commands:
 
 ```bash
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init [--ollama|--ollama-cloud]  # write a starter panel.toml
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops probe          # score & rank the configured seats
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs list     # inspect / cancel runs
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops runs cancel <run-id>
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops verdict <run-id> <family> <n> confirmed|fp [--note why]
-PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops stats          # per-seat / per-coder false-positive rates
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops init [--ollama|--ollama-cloud]  # write a starter panel.toml
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops probe          # score & rank the configured seats
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops runs list     # inspect / cancel runs
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops runs cancel <run-id>
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops verdict <run-id> <family> <n> confirmed|fp [--note why]
+PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core:$HOME/.omp/plugins/cache/plugins/agent-ops___agent-ops___0.4.1/core" python3 -m agent_ops stats          # per-seat / per-coder false-positive rates
 ```
 
 ## What it does

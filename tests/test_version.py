@@ -30,6 +30,19 @@ def test_plugin_manifest_package_and_changelog_agree():
         f"package={agent_ops.__version__!r} changelog={heading.group(1)!r}")
 
 
+def test_omp_cache_path_in_the_docs_names_the_current_version():
+    """The skill and /panel-setup give omp a fixed plugin-cache path, because omp neither
+    substitutes ${CLAUDE_PLUGIN_ROOT} nor exports it. The cache directory is named after
+    the plugin version, so a bump that forgets these files leaves every omp command
+    pointing at a directory that no longer exists, which reads as a broken install."""
+    pattern = re.compile(r"agent-ops___agent-ops___(\d+\.\d+\.\d+)")
+    for rel in ("skills/agent-ops/SKILL.md", "commands/panel-setup.md"):
+        found = set(pattern.findall((ROOT / rel).read_text()))
+        assert found == {agent_ops.__version__}, (
+            f"{rel} names omp cache version(s) {sorted(found)}, "
+            f"package is {agent_ops.__version__!r}")
+
+
 def test_user_agent_carries_the_package_version():
     assert USER_AGENT == f"agent-ops/{agent_ops.__version__}", USER_AGENT
 
