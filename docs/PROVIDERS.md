@@ -88,7 +88,7 @@ error text, and the preflight listing. You override the dialect hooks:
 | Hook | Default | Override to |
 |---|---|---|
 | `chat_path` | `"/chat/completions"` | call a different path under `base_url` |
-| `build_body(model, messages, *, max_tokens, temperature)` | OpenAI request body | change the request shape |
+| `build_body(model, messages, *, max_tokens, temperature)` | OpenAI request body | change the request shape (a seat's `params` are merged in underneath, so they still work; your body wins any clash) |
 | `parse_response(data)` | OpenAI `choices[0].message` | read another response shape |
 | `_headers()` | JSON headers plus `Authorization: Bearer <key>` | authenticate another way |
 | `list_models()` | `GET {base_url}/models` | return `None` when there is no listing |
