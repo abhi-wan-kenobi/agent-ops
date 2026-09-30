@@ -13,18 +13,25 @@ from memory.
 2. Ask which path they want (one question):
    - **OpenRouter** (recommended): one API key, three cheap diverse model families.
    - **Local Ollama**: no key at all, runs on their machine, weaker seats.
+   - **Ollama hosted API**: one `OLLAMA_API_KEY`, no daemon, cloud-sized models.
 
    Then run the matching command:
 
    ```bash
    PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init            # OpenRouter
    PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init --ollama   # local
+   PYTHONPATH="${CLAUDE_PLUGIN_ROOT}/core" python3 -m agent_ops init --ollama-cloud   # hosted
    ```
 
 3. Make sure the credential/daemon side is ready:
    - OpenRouter: they need `OPENROUTER_API_KEY` exported (keys at https://openrouter.ai/keys).
      Do not ask them to paste the key into the chat — they export it in their shell.
    - Ollama: the models in panel.toml must match `ollama list`; help them edit the file if not.
+   - Ollama hosted API: they need `OLLAMA_API_KEY` exported (keys at
+     https://ollama.com/settings/keys), same rule: never ask for it in chat.
+
+   If their endpoint is none of these, `docs/PROVIDERS.md` covers any OpenAI-compatible
+   endpoint (config only) and writing a custom provider class (one small file).
 
 4. Probe the seats and read the result to them honestly:
 

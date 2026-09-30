@@ -38,6 +38,20 @@ def test_ollama_flavor_needs_no_key_and_says_edit_models_first(tmp_path, capsys)
     assert "ollama list" in out
 
 
+def test_ollama_cloud_flavor_wants_a_key_and_points_at_the_hosted_api(tmp_path, capsys):
+    target = tmp_path / "panel.toml"
+    assert run_init(["--ollama-cloud", "--config", str(target)]) == 0
+    cfg = load_config(target)
+    assert len({s.family for s in cfg.seats}) >= 3, "coder-family exclusion needs spare families"
+    prov = cfg.providers["ollama-cloud"]
+    assert (prov.type, prov.base_url, prov.api_key_env) == (
+        "ollama", "https://ollama.com/v1", "OLLAMA_API_KEY")
+    assert {s.provider for s in cfg.seats} == {"ollama-cloud"}
+    out = capsys.readouterr().out
+    assert "export OLLAMA_API_KEY" in out and "agent_ops probe" in out
+    assert "no API key needed" not in out
+
+
 def test_init_never_overwrites(tmp_path, capsys):
     target = tmp_path / "panel.toml"
     target.write_text("# my hand-curated panel\n", encoding="utf-8")
@@ -47,8 +61,10 @@ def test_init_never_overwrites(tmp_path, capsys):
 
 
 def test_flavors_are_mutually_exclusive(tmp_path):
-    with pytest.raises(SystemExit):
-        run_init(["--openrouter", "--ollama", "--config", str(tmp_path / "p.toml")])
+    for pair in (["--openrouter", "--ollama"], ["--ollama", "--ollama-cloud"],
+                 ["--openrouter", "--ollama-cloud"]):
+        with pytest.raises(SystemExit):
+            run_init([*pair, "--config", str(tmp_path / "p.toml")])
 
 
 def test_init_creates_parent_directories(tmp_path):

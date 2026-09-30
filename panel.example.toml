@@ -72,8 +72,9 @@ model = "z-ai/glm-4.7-flash"
 
 # ── Providers ───────────────────────────────────────────────────────────────────────────
 # `type` selects the client implementation; openrouter/ollama/openai-compatible all speak
-# the same OpenAI-compatible dialect. `api_key_env` NAMES the environment variable — the
-# key itself never lives in this file. Omit api_key_env for endpoints with no auth.
+# the same OpenAI-compatible dialect, and a `module:ClassName` type loads your own class
+# for any other dialect (docs/PROVIDERS.md). `api_key_env` NAMES the environment variable —
+# the key itself never lives in this file. Omit api_key_env for endpoints with no auth.
 
 [providers.openrouter]
 type = "openrouter"
@@ -85,11 +86,26 @@ type = "ollama"
 base_url = "http://localhost:11434/v1"
 # api_key_env omitted → no Authorization header
 
+# Ollama's hosted API instead of a local daemon: one key, no daemon. Model ids come from
+# `curl https://ollama.com/v1/models` (no `-cloud` suffix). `init --ollama-cloud` writes
+# a starter panel for it.
+# [providers.ollama-cloud]
+# type = "ollama"
+# base_url = "https://ollama.com/v1"
+# api_key_env = "OLLAMA_API_KEY"
+
 # Any other OpenAI-compatible endpoint works the same way:
 # [providers.my-endpoint]
 # type = "openai-compatible"
 # base_url = "https://api.example.com/v1"
 # api_key_env = "MY_ENDPOINT_KEY"
+
+# An endpoint that speaks a different dialect: your own class, one small file in
+# ~/.agent-ops/providers/ (see docs/PROVIDERS.md for a complete example).
+# [providers.mine]
+# type = "mydialect:MessagesProvider"
+# base_url = "https://api.example.com/v1"
+# api_key_env = "MY_KEY"
 
 # Optional per-provider request headers — attribution, routing, or tagging spend per
 # team/project at the provider. Authorization and Content-Type are refused here:
