@@ -509,6 +509,8 @@ def audit(argv: list[str]) -> int:
     # another panel is visible as "queued" rather than not existing yet.
     run_id, outdir = claim_run_dir(config.outroot)
     summary.run_id, summary.outdir = run_id, outdir
+    for p in providers.values():
+        p.run_id = run_id
     summary.panel = [s.name for s in panel]
     label = f"agent-ops:{os.getpid()}"
     run_state.new_run(run_id, str(outdir), str(repo), a.scope, a.coder)

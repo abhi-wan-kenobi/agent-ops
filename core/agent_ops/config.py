@@ -81,6 +81,10 @@ class Seat:
 RESERVED_PARAMS = frozenset({"model", "messages", "max_tokens", "max_completion_tokens",
                              "stream"})
 
+# The one substitution a header value may carry: replaced with the run id on every seat
+# request, so a gateway can attribute each call to the panel run that made it.
+RUN_ID_PLACEHOLDER = "{run_id}"
+
 
 @dataclasses.dataclass(frozen=True)
 class ProviderConfig:
@@ -92,7 +96,7 @@ class ProviderConfig:
     # per team at the provider). Vendor-neutral by construction: the core never knows
     # what they mean. Authorization and Content-Type are refused at load time — auth
     # goes through api_key_env (a key must never live in the config file), and the
-    # client owns its own body encoding.
+    # client owns its own body encoding. A value may contain RUN_ID_PLACEHOLDER.
     headers: dict[str, str] = dataclasses.field(default_factory=dict)
 
 
@@ -106,6 +110,10 @@ class Config:
     seats: list[Seat]
     providers: dict[str, ProviderConfig]
     path: pathlib.Path | None = None
+    # [agent_ops].allowed_providers: when set, every seat must use one of these provider
+    # tables. None means unrestricted. It turns a policy such as "reviews only ever run on
+    # these endpoints" into a load-time refusal. A comment in panel.toml cannot enforce it.
+    allowed_providers: frozenset[str] | None = None
 
     @property
     def runs_dir(self) -> pathlib.Path:
@@ -200,6 +208,13 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
                      ("lease_slots", lease_slots)):
         if not isinstance(val, int) or val <= 0:
             raise ConfigError(f"{cfg_path}: [agent_ops].{key} must be a positive integer")
+    allowed_raw = ops.get("allowed_providers")
+    if allowed_raw is not None and (
+            not isinstance(allowed_raw, list) or not allowed_raw
+            or not all(isinstance(p, str) and p.strip() for p in allowed_raw)):
+        raise ConfigError(f"{cfg_path}: [agent_ops].allowed_providers must be a non-empty "
+                          f"list of provider names, e.g. [\"ollama\"]")
+    allowed = frozenset(p.strip() for p in allowed_raw) if allowed_raw is not None else None
 
     providers: dict[str, ProviderConfig] = {}
     for name, table in (raw.get("providers") or {}).items():
@@ -238,6 +253,14 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
             headers=dict(headers),
         )
 
+    if allowed is not None:
+        undefined = sorted(allowed - providers.keys())
+        if undefined:
+            # A typo here would otherwise refuse every seat with a misleading message.
+            raise ConfigError(f"{cfg_path}: [agent_ops].allowed_providers names "
+                              f"{', '.join(map(repr, undefined))}, which no [providers.*] "
+                              f"table defines")
+
     seats: list[Seat] = []
     seen_names: set[str] = set()
     for i, table in enumerate(raw.get("seats") or []):
@@ -258,6 +281,11 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
             raise ConfigError(
                 f"{where}: provider {seat.provider!r} is not defined — add a "
                 f"[providers.{seat.provider}] table or fix the reference")
+        if allowed is not None and seat.provider not in allowed:
+            raise ConfigError(
+                f"{where}: seat {seat.name!r} uses provider {seat.provider!r}, which "
+                f"[agent_ops].allowed_providers does not permit (allowed: "
+                f"{', '.join(sorted(allowed))})")
         seats.append(seat)
 
     return Config(
@@ -269,4 +297,5 @@ def load_config(path: str | pathlib.Path | None = None) -> Config:
         seats=seats,
         providers=providers,
         path=cfg_path,
+        allowed_providers=allowed,
     )

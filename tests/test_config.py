@@ -179,6 +179,63 @@ def test_non_string_header_value_is_refused(tmp_path):
         load_config(_headers_toml(tmp_path, '[providers.p.headers]\n"X-N" = 5'))
 
 
+def _allowed_toml(tmp_path, allowed_line):
+    return _write(tmp_path, f"""
+    [agent_ops]
+    {allowed_line}
+
+    [[seats]]
+    name = "seat-a"
+    family = "deepseek"
+    provider = "openrouter"
+    model = "deepseek/deepseek-chat"
+
+    [[seats]]
+    name = "local"
+    family = "llama"
+    provider = "ollama"
+    model = "llama3.1"
+
+    [providers.openrouter]
+    type = "openrouter"
+    base_url = "https://openrouter.ai/api/v1"
+
+    [providers.ollama]
+    type = "ollama"
+    base_url = "http://localhost:11434/v1"
+    """)
+
+
+def test_allowed_providers_unset_means_unrestricted(tmp_path):
+    cfg = load_config(_allowed_toml(tmp_path, ""))
+    assert cfg.allowed_providers is None
+    assert {s.provider for s in cfg.seats} == {"openrouter", "ollama"}
+
+
+def test_seat_on_a_provider_outside_allowed_providers_is_refused(tmp_path):
+    """The policy "reviews only run on these endpoints" must fail at load, before any
+    seat sends the code anywhere, not depend on someone reading a comment."""
+    with pytest.raises(ConfigError, match="'seat-a' uses provider 'openrouter'"):
+        load_config(_allowed_toml(tmp_path, 'allowed_providers = ["ollama"]'))
+
+
+def test_allowed_providers_admits_its_own_seats(tmp_path):
+    cfg = load_config(_allowed_toml(tmp_path, 'allowed_providers = ["ollama", "openrouter"]'))
+    assert cfg.allowed_providers == frozenset({"ollama", "openrouter"})
+
+
+def test_allowed_providers_naming_an_undefined_provider_is_refused(tmp_path):
+    with pytest.raises(ConfigError, match="'olama'"):
+        load_config(_allowed_toml(tmp_path, 'allowed_providers = ["olama", "openrouter"]'))
+
+
+@pytest.mark.parametrize("line", ['allowed_providers = []', 'allowed_providers = "ollama"',
+                                  'allowed_providers = [""]'])
+def test_malformed_allowed_providers_is_refused(tmp_path, line):
+    with pytest.raises(ConfigError, match="allowed_providers must be a non-empty list"):
+        load_config(_allowed_toml(tmp_path, line))
+
+
 def test_agent_ops_home_rebases_every_default_path(tmp_path, monkeypatch):
     """One environment variable moves config, reports and state together. A CI job needs
     all three in a scratch directory, and passing three flags to get there is a way to

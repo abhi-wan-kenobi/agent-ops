@@ -25,7 +25,7 @@ import urllib.request
 
 from . import __version__
 from .classify import SECRET_RE
-from .config import RESERVED_PARAMS, ConfigError, ProviderConfig, home
+from .config import RESERVED_PARAMS, RUN_ID_PLACEHOLDER, ConfigError, ProviderConfig, home
 
 USER_AGENT = f"agent-ops/{__version__}"
 
@@ -63,6 +63,10 @@ class BaseProvider:
     def __init__(self, cfg: ProviderConfig):
         self.cfg = cfg
         self.api_key: str | None = None
+        # Set by the review flow once the run is claimed, so a `{run_id}` placeholder in a
+        # configured header can tag every seat request with the run it belongs to. Unset
+        # (probe, model listing) means the placeholder header is not sent at all.
+        self.run_id: str | None = None
         if cfg.api_key_env:
             self.api_key = os.environ.get(cfg.api_key_env)
             if not self.api_key:
@@ -80,7 +84,14 @@ class BaseProvider:
         # defaults and auth: they may override the User-Agent, but Authorization is
         # applied AFTER them and Content-Type/Authorization are refused at config load,
         # so no config line can smuggle or displace a credential.
-        h.update(self.cfg.headers)
+        for k, v in self.cfg.headers.items():
+            if RUN_ID_PLACEHOLDER in v:
+                if not self.run_id:
+                    # An empty run tag would read downstream as a run with no id, so
+                    # outside a run the header is left off rather than sent blank.
+                    continue
+                v = v.replace(RUN_ID_PLACEHOLDER, self.run_id)
+            h[k] = v
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
         return h

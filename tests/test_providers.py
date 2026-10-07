@@ -306,6 +306,28 @@ def test_config_headers_can_override_openrouter_attribution(server):
     assert headers.get("X-Title") == "my-org-reviews"
 
 
+def test_run_id_placeholder_tags_each_request_with_the_run(server):
+    """A gateway attributes spend to a panel run only if every seat request names it."""
+    server.responses = [(200, _ok_body("ok"))]
+    p = _provider_with_headers(server, {"X-Run": "{run_id}", "X-Caller": "agent-ops"})
+    p.run_id = "20261007-081500"
+    p.call("m", MSGS, max_tokens=10)
+    _, headers, _ = server.requests[0]
+    assert headers.get("X-Run") == "20261007-081500"
+    assert headers.get("X-Caller") == "agent-ops"
+
+
+def test_run_id_header_is_omitted_outside_a_run(server):
+    """Probe and listing calls have no run. A blank run tag would read as a run with no
+    id, so the header is left off and the static headers still go out."""
+    server.responses = [(200, _ok_body("ok"))]
+    p = _provider_with_headers(server, {"X-Run": "run={run_id}", "X-Caller": "agent-ops"})
+    p.call("m", MSGS, max_tokens=10)
+    _, headers, _ = server.requests[0]
+    assert "X-Run" not in headers
+    assert headers.get("X-Caller") == "agent-ops"
+
+
 # ── Ollama ─────────────────────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("model,listed,expected", [

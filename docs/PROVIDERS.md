@@ -65,10 +65,16 @@ api_key_env = "MY_ENDPOINT_KEY"
 
 [providers.my-endpoint.headers]        # optional: attribution, routing, spend tagging
 "X-Cost-Center" = "platform-eng"
+"X-Run" = "{run_id}"                   # replaced with the panel run id on every seat call
 ```
 
 `base_url` is joined with `/chat/completions` (and `/models` for the preflight listing).
 That covers most hosted and self-hosted inference servers.
+
+`{run_id}` is the only placeholder. A header whose value uses it is sent only during a
+review run; probe and listing calls leave it off. To keep seats on endpoints you approve,
+set `allowed_providers = ["my-endpoint"]` under `[agent_ops]`. A seat on any other
+provider is then refused when the config loads.
 
 ## Custom providers
 

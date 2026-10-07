@@ -19,6 +19,8 @@
 # lease_slots = 1                       # concurrent panels. Raise only after measuring your
 #                                       # provider serving that many cleanly — saturation
 #                                       # queues silently, it does not error
+# allowed_providers = ["openrouter"]    # when set, a seat on any other [providers.*] table
+#                                       # is refused at load — policy the tool enforces
 
 # ── Starter panel: three cheap, diverse OpenRouter families ────────────────────────────
 # Model ids verified against openrouter.ai/api/v1/models on 2026-09-08, and all three

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`{run_id}` in a provider header value.** Every seat request carries the run id, so a
+  gateway that records request headers can attribute each call to the panel run that made
+  it, instead of guessing from time windows. Calls outside a run (probe, model listing)
+  leave that header off rather than send it blank.
+- **`[agent_ops].allowed_providers`.** A list of the provider tables seats may use. A seat
+  on any other provider is refused when the config loads, before any code leaves the
+  machine. This turns a policy such as "reviews run only on our own gateway" into a check
+  the tool enforces. A comment in `panel.toml` cannot do that. Unset means unrestricted,
+  as before.
+
 ## v0.4.1 — 2026-09-30
 
 Theme: **the plugin's commands work under omp.**
