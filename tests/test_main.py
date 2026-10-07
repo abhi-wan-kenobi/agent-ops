@@ -445,6 +445,20 @@ def test_probe_subcommand_writes_the_roster(env, monkeypatch, capsys):
     assert len(roster["seats"]) == 2
 
 
+@pytest.mark.parametrize("extra", [["--help"], ["--jsn"]])
+def test_probe_help_or_unknown_flag_never_calls_a_seat(env, monkeypatch, extra):
+    """Found 2026-10-07: `probe --help` ignored the flag and started a real probe across
+    every seat, spending shared quota. Help and typos must exit before any call."""
+    repo, cfg, tmp = env
+    from agent_ops import probe as probe_mod
+    calls = []
+    monkeypatch.setattr(probe_mod, "make_provider", lambda c: calls.append(c) or FakeProvider(c))
+    with pytest.raises(SystemExit):
+        main(["probe", "--config", str(cfg), *extra])
+    assert calls == []
+    assert not (tmp / "state" / "roster.json").exists()
+
+
 # --- regressions from the 2026-09-01 adversarial audit of this port ------------------------
 
 def test_a_crashing_seat_becomes_an_error_seat_not_a_dead_panel(env, fake_provider, capsys):

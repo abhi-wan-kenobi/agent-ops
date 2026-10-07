@@ -14,6 +14,14 @@
   the tool enforces. A comment in `panel.toml` cannot do that. Unset means unrestricted,
   as before.
 
+### Fixed
+
+- **`agent_ops probe --help` started a real probe.** The subcommand scanned its arguments
+  for `--json` and ignored everything else, so `--help` or a mistyped flag sent the
+  probe payload to every configured seat and spent their quota. probe now has a real
+  argument parser: help prints and exits, and an unknown flag fails before any seat is
+  called.
+
 ## v0.4.1 — 2026-09-30
 
 Theme: **the plugin's commands work under omp.**

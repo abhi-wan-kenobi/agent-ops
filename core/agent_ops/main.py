@@ -668,10 +668,17 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         return (run_verdict if cmd == "verdict" else run_stats)(stats_path, rest)
     if cmd == "probe":
-        cfg_path, rest = _pop_config(argv[1:])
-        json_out = "--json" in rest
+        # A real parser, not a scan for --json: probe spends quota on every seat, so
+        # `probe --help` or a typo'd flag must stop here instead of starting a probe.
+        pp = argparse.ArgumentParser(
+            prog="agent_ops probe",
+            description="Score every configured seat on a known-defect diff and rank the "
+                        "usable ones into roster.json. Calls every seat.")
+        pp.add_argument("--config", default=None, help="panel.toml path")
+        pp.add_argument("--json", action="store_true", help="print the scores as JSON")
+        pa = pp.parse_args(argv[1:])
         try:
-            return run_probe(load_config(cfg_path), json_out=json_out)
+            return run_probe(load_config(pa.config), json_out=pa.json)
         except ConfigError as e:
             print(f"CONFIG ERROR: {e}", file=sys.stderr)
             return 2
